@@ -1,0 +1,33 @@
+[package]
+name = "shotr"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ab_glyph = "0.2.32"
+arboard = "3.6.1"
+directories = "6.0.0"
+eframe = "0.34.3"
+image = "0.25.10"
+ocrs = "0.12.2"
+regex = "1.13.1"
+rfd = "0.17.2"
+rten = "0.24"
+rten-imageproc = "0.24"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+ureq = { version = "3.3.0", default-features = false, features = ["rustls"] }
+xcap = { version = "0.9.6", features = ["image"] }
+
+# Linux-only: the tray speaks StatusNotifierItem over D-Bus (no GTK needed), and
+# window listing/capture speaks the Wayland toplevel protocols directly, because
+# xcap's window path returns an empty list on Wayland compositors.
+[target.'cfg(target_os = "linux")'.dependencies]
+ksni = { version = "0.3.6", default-features = false, features = ["blocking", "async-io"] }
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }
+
+[profile.release]
+# The OCR stack (rten) drags in a lot of symbols; stripping roughly halves the
+# installed binary and costs nothing at runtime.
+strip = true

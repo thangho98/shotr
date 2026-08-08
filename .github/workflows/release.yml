@@ -1,0 +1,82 @@
+name: build
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+  pull_request:
+
+jobs:
+  # Correctness runs once, on Linux — the test suite touches no platform API, so
+  # running it three times would only cost minutes.
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with: { components: clippy }
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev
+      - name: Zero warnings, not few
+        run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test --release
+
+  build:
+    needs: check
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            script: packaging/build-linux.sh
+          - os: windows-latest
+            script: packaging/build-windows.sh
+            target: x86_64-pc-windows-msvc
+          # macOS cannot be cross-compiled: Apple's SDK is not redistributable,
+          # so this is the only place the .app can be built.
+          - os: macos-latest
+            script: packaging/build-macos.sh
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Linux build deps
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev
+
+      - name: NSIS for the Windows installer
+        if: runner.os == 'Windows'
+        run: choco install nsis -y
+
+      - name: macOS targets
+        if: runner.os == 'macOS'
+        run: rustup target add x86_64-apple-darwin aarch64-apple-darwin
+
+      - name: Package
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: bash ${{ matrix.script }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: shotr-${{ runner.os }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions: { contents: write }
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { path: dist, merge-multiple: true }
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          body: |
+            Unsigned. Windows and macOS will warn on first launch.
+            macOS: right-click the app and choose Open.
