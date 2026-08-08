@@ -10,6 +10,20 @@ repeatedly.
 | `build-macos.sh` | macOS only | universal `.app` inside a `.dmg` |
 | `install-macos.sh` | macOS only | copies that `.app` into `/Applications` |
 
+## Build dependencies
+
+Windows and macOS need a Rust toolchain and nothing else. Linux additionally
+needs headers for the libraries xcap links — `libpipewire-0.3`, `libdrm` and
+`gbm`:
+
+```bash
+sudo apt-get install -y libpipewire-0.3-dev libdrm-dev libgbm-dev   # Debian/Ubuntu
+sudo pacman -S pipewire libdrm mesa                                 # Arch
+```
+
+Any desktop distribution has all three already, which is why this went unnoticed
+until a CI runner — which has none of them — tried to compile `libspa-sys`.
+
 ## Cutting a release
 
 `.github/workflows/release.yml` runs all three scripts on three runners and
