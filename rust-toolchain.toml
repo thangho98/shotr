@@ -1,0 +1,15 @@
+# The compiler this project is built with, everywhere. rustup reads this file
+# on entering the directory, so CI and a developer's machine agree by default
+# rather than by discipline.
+#
+# It is pinned because `cargo clippy -- -D warnings` gates every release: a lint
+# added in a newer rustc turns a green checkout into a red pipeline without a
+# single line changing. Rust 1.96 did exactly that, with the float-literal
+# fallback in `theme::apply`, and it surfaced while cutting a release.
+#
+# Bumping is a deliberate step — edit the channel, run the workflow, fix what
+# the new compiler has to say. That is work to do on a quiet afternoon, not
+# during a release.
+[toolchain]
+channel = "1.97.1"
+components = ["clippy"]

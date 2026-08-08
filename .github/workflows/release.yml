@@ -23,8 +23,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with: { components: clippy }
+      # No version named here on purpose: rust-toolchain.toml holds it, and two
+      # places to bump is one place to forget. With no argument this installs
+      # what that file says, clippy included, and rustup's directory override
+      # makes it the toolchain every cargo call below runs on — the same one a
+      # developer gets by entering the directory.
+      - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
       # xcap's Linux backend reaches libpipewire, libdrm and gbm through -sys
       # crates, so their headers must be here before anything compiles at all —
@@ -55,7 +59,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - run: rustup toolchain install   # the version rust-toolchain.toml names
       - uses: Swatinem/rust-cache@v2
 
       - name: Linux build deps

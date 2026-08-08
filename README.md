@@ -134,6 +134,11 @@ cargo test                   # 163 tests; no network, no GPU, no display
 cargo clippy --all-targets   # must be zero warnings
 ```
 
+`rust-toolchain.toml` pins the compiler, so rustup fetches that exact version
+the first time you build here and CI uses the same one — "zero warnings" means
+nothing if the machine judging it keeps changing. Linux additionally needs a few
+system headers; see [packaging/README.md](packaging/README.md).
+
 Conventions and the things that will bite you are in [CLAUDE.md](CLAUDE.md).
 Packaging is in [packaging/README.md](packaging/README.md).
 
