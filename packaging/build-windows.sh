@@ -17,7 +17,18 @@ cp "target/$TARGET/release/shotr.exe" "$OUT/"
 cp packaging/windows/README.txt "$OUT/" 2>/dev/null || true
 
 mkdir -p dist
-(cd dist && zip -qr "shotr-$VERSION-windows-x64.zip" "$(basename "$OUT")")
+# Windows ships no `zip`, and neither does the Git Bash this script runs under
+# there — the first CI build got all the way through an nine-minute compile
+# before dying on it. PowerShell is the archiver that is always present on
+# Windows, as `zip` is on Linux, so take whichever this machine has. Both are
+# given the directory rather than its contents, so either way the archive
+# unpacks into one folder instead of scattering files.
+if command -v zip >/dev/null; then
+    (cd dist && zip -qr "shotr-$VERSION-windows-x64.zip" "$(basename "$OUT")")
+else
+    powershell -NoProfile -Command \
+        "Compress-Archive -Force -Path '$OUT' -DestinationPath 'dist/shotr-$VERSION-windows-x64.zip'"
+fi
 echo "==> Done: dist/shotr-$VERSION-windows-x64.zip"
 
 # The installer needs NSIS. It is optional so the zip is always produced.
