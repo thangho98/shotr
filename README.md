@@ -112,4 +112,14 @@ Packaging is in [packaging/README.md](packaging/README.md).
 
 ## Licence
 
-Not chosen yet.
+[GNU General Public License v3.0](LICENSE).
+
+You may use, study, change and share this program. If you distribute a modified
+version, you must release its source under the same licence — a fork that ships
+to other people has to stay open.
+
+Two limits worth knowing: the obligation is triggered by *distribution*, so
+someone may fork it privately and never publish, and the GPL — unlike the AGPL —
+does not treat running software over a network as distribution. Neither matters
+much for a desktop screenshot tool, but say so rather than imply more reach than
+the licence has.

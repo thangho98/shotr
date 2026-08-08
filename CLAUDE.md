@@ -159,6 +159,13 @@ that cannot do it rather than the platform — that mistake has been made twice
 here, with tray icons and with window listing, and both turned out to be
 possible.
 
+## Licence
+
+GPL-3.0-only. `src/main.rs` carries the notice the licence asks each source
+release to include; keep it there. Adding a dependency under a licence that
+cannot be combined with the GPL — anything proprietary, or Apache-2.0 in the
+GPLv2 direction — is a licensing decision, not a routine `cargo add`.
+
 ## Platform support
 
 | | Linux | Windows | macOS |

@@ -2,6 +2,9 @@
 name = "shotr"
 version = "0.1.0"
 edition = "2024"
+license = "GPL-3.0-only"
+description = "Screenshot beautifier: capture, compose, annotate, redact, export."
+repository = "https://github.com/thangho98/shotr"
 
 [dependencies]
 ab_glyph = "0.2.32"
