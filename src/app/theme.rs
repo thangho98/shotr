@@ -22,6 +22,12 @@ const CARD: Color32 = Color32::from_rgb(0x1d, 0x1f, 0x25);
 const TEXT: Color32 = Color32::from_rgb(0xe7, 0xe9, 0xee);
 const TEXT_DIM: Color32 = Color32::from_rgb(0x8b, 0x91, 0xa0);
 
+// `Stroke::new` takes `impl Into<f32>`, which leaves a bare `1.0` for inference
+// to resolve. It used to quietly pick `f32`; since Rust 1.96 that fallback is
+// on its way out and warns, which under `-D warnings` is a failed build. Hence
+// the `_f32` on every literal width here and in `canvas.rs` and `icons.rs` —
+// they are not decoration, and removing them breaks CI before it breaks anyone
+// locally, because CI tracks stable and a working checkout may not.
 pub fn apply(ctx: &egui::Context) {
     let mut style = (*ctx.global_style()).clone();
 
@@ -30,10 +36,10 @@ pub fn apply(ctx: &egui::Context) {
     v.window_fill = PANEL;
     v.extreme_bg_color = CANVAS;
     v.faint_bg_color = Color32::from_rgb(0x1e, 0x20, 0x26);
-    v.window_stroke = Stroke::new(1.0, LINE);
+    v.window_stroke = Stroke::new(1.0_f32, LINE);
     v.window_corner_radius = CornerRadius::same(10);
     v.selection.bg_fill = ACCENT.gamma_multiply(0.40);
-    v.selection.stroke = Stroke::new(1.0, TEXT);
+    v.selection.stroke = Stroke::new(1.0_f32, TEXT);
     v.hyperlink_color = ACCENT;
     // The stock shadows are heavy enough to read as a second UI layer.
     v.popup_shadow.spread = 2;
@@ -44,8 +50,8 @@ pub fn apply(ctx: &egui::Context) {
 
     w.noninteractive.bg_fill = PANEL;
     w.noninteractive.weak_bg_fill = PANEL;
-    w.noninteractive.bg_stroke = Stroke::new(1.0, LINE);
-    w.noninteractive.fg_stroke = Stroke::new(1.0, TEXT_DIM);
+    w.noninteractive.bg_stroke = Stroke::new(1.0_f32, LINE);
+    w.noninteractive.fg_stroke = Stroke::new(1.0_f32, TEXT_DIM);
     w.noninteractive.corner_radius = radius;
 
     for (state, fill, stroke) in [
@@ -56,8 +62,8 @@ pub fn apply(ctx: &egui::Context) {
     ] {
         state.bg_fill = fill;
         state.weak_bg_fill = fill;
-        state.bg_stroke = Stroke::new(1.0, stroke);
-        state.fg_stroke = Stroke::new(1.0, TEXT);
+        state.bg_stroke = Stroke::new(1.0_f32, stroke);
+        state.fg_stroke = Stroke::new(1.0_f32, TEXT);
         state.corner_radius = radius;
         // egui grows widgets on hover by default, which makes a row of tool
         // buttons jitter as the pointer crosses it.
@@ -127,7 +133,7 @@ pub fn card<R>(ui: &mut egui::Ui, title: &str, add: impl FnOnce(&mut egui::Ui) -
     }
     egui::Frame::NONE
         .fill(CARD)
-        .stroke(Stroke::new(1.0, LINE))
+        .stroke(Stroke::new(1.0_f32, LINE))
         .corner_radius(CornerRadius::same(9))
         .inner_margin(egui::Margin::symmetric(10, 9))
         .show(ui, |ui| {

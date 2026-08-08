@@ -38,7 +38,7 @@ pub fn tool_button(ui: &mut egui::Ui, tool: Tool, selected: bool) -> egui::Respo
         painter.rect_stroke(
             rect,
             8.0,
-            egui::Stroke::new(1.0, super::theme::ACCENT),
+            egui::Stroke::new(1.0_f32, super::theme::ACCENT),
             egui::StrokeKind::Inside,
         );
     }

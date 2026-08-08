@@ -148,7 +148,7 @@ impl ShotrApp {
         let height = ROW * self.windows.len() as f32 + 16.0;
         let panel = egui::Rect::from_center_size(img_rect.center(), egui::vec2(width, height));
         painter.rect_filled(panel, 10.0, egui::Color32::from_rgb(0x1b, 0x1d, 0x22));
-        draw_border(&painter, panel, egui::Stroke::new(1.0, egui::Color32::from_gray(60)));
+        draw_border(&painter, panel, egui::Stroke::new(1.0_f32, egui::Color32::from_gray(60)));
 
         let hover = resp.hover_pos();
         let mut chosen = None;
@@ -412,7 +412,7 @@ impl ShotrApp {
                 draw_border(
                     painter,
                     rect_of(word.rect),
-                    egui::Stroke::new(1.5, egui::Color32::from_rgb(0xff, 0x6b, 0x6b)),
+                    egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(0xff, 0x6b, 0x6b)),
                 );
             }
         }
@@ -420,7 +420,7 @@ impl ShotrApp {
             draw_border(
                 painter,
                 egui::Rect::from_two_pos(to_screen(a), to_screen(b)),
-                egui::Stroke::new(1.0, egui::Color32::from_rgb(0x4a, 0x9e, 0xff)),
+                egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(0x4a, 0x9e, 0xff)),
             );
         }
     }
@@ -553,7 +553,7 @@ impl ShotrApp {
         draw_border(
             painter,
             box_rect,
-            egui::Stroke::new(1.0, crate::app::theme::ACCENT.gamma_multiply(0.7)),
+            egui::Stroke::new(1.0_f32, crate::app::theme::ACCENT.gamma_multiply(0.7)),
         );
 
         let head = draft.text.get(..self.text_caret).unwrap_or(&draft.text);
@@ -575,7 +575,7 @@ impl ShotrApp {
                     egui::pos2(caret_x, base),
                     egui::pos2(caret_x + w, base),
                 ],
-                egui::Stroke::new(1.5, color),
+                egui::Stroke::new(1.5_f32, color),
             );
         }
 
@@ -586,7 +586,7 @@ impl ShotrApp {
                     egui::pos2(caret_x, box_rect.min.y + 2.0),
                     egui::pos2(caret_x, box_rect.max.y - 2.0),
                 ],
-                egui::Stroke::new(1.5, color),
+                egui::Stroke::new(1.5_f32, color),
             );
         }
 
@@ -682,7 +682,7 @@ impl ShotrApp {
             draw_border(
                 painter,
                 rect,
-                egui::Stroke::new(1.5, egui::Color32::from_rgb(0x4a, 0x9e, 0xff)),
+                egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(0x4a, 0x9e, 0xff)),
             );
         }
     }
@@ -740,7 +740,7 @@ fn paint_layer_preview(
             draw_border(
                 painter,
                 rect,
-                egui::Stroke::new(1.5, egui::Color32::from_gray(230)),
+                egui::Stroke::new(1.5_f32, egui::Color32::from_gray(230)),
             );
             painter.rect_filled(rect, 0.0, egui::Color32::from_black_alpha(90));
         }
@@ -874,7 +874,7 @@ fn overlaps(a: [f32; 4], b: [f32; 4]) -> bool {
 }
 
 fn accent_stroke() -> egui::Stroke {
-    egui::Stroke::new(2.0, egui::Color32::from_rgb(0x4a, 0x9e, 0xff))
+    egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(0x4a, 0x9e, 0xff))
 }
 
 fn clamp_pos(p: egui::Pos2, r: egui::Rect) -> egui::Pos2 {
