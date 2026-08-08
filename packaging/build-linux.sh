@@ -70,7 +70,10 @@ if command -v dpkg-deb >/dev/null; then
     mkdir -p "$SHLIB/debian"
     printf 'Source: shotr\n\nPackage: shotr\nArchitecture: any\n' > "$SHLIB/debian/control"
     cp target/release/shotr "$SHLIB/shotr"
-    DEPS=$(cd "$SHLIB" && dpkg-shlibdeps -O --ignore-missing-info ./shotr 2>/dev/null \
+    # Warnings are left on stderr rather than silenced: --ignore-missing-info
+    # keeps a library nobody can map from failing a release, and the whole point
+    # of that leniency is that somebody reads the line saying it happened.
+    DEPS=$(cd "$SHLIB" && dpkg-shlibdeps -O --ignore-missing-info ./shotr \
         | sed 's/^shlibs:Depends=//') || DEPS=""
 
     {
