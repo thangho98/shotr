@@ -5,10 +5,20 @@ repeatedly.
 
 | Script | Runs on | Produces |
 |---|---|---|
-| `build-linux.sh` | Linux | `shotr-VERSION-linux-ARCH.tar.gz` (binary + `install.sh`) |
+| `build-linux.sh` | Linux | `.tar.gz` (binary + `install.sh`), plus `.deb` and `.rpm` when `dpkg-deb` / `rpmbuild` are present |
 | `build-windows.sh` | Windows, or Linux with mingw-w64 | `.zip`, plus `setup.exe` when `makensis` is present |
-| `build-macos.sh` | macOS only | universal `.app` inside a `.dmg` |
+| `build-macos.sh` | macOS only | universal `.app` inside a drag-to-install `.dmg` |
 | `install-macos.sh` | macOS only | copies that `.app` into `/Applications` |
+
+Each platform has exactly one artefact that always builds — the tarball, the
+zip, the dmg — and the packaged forms are conditional on a tool being there.
+That is deliberate: a release must not fail because a runner image dropped
+`rpmbuild`. It is also why a skipped package is easy to miss, and NSIS was
+skipped in CI for months with the line scrolling past unread.
+
+`shotr.desktop.in` is the launcher entry, in one place. `install.sh` renders it
+against `~/.local/bin`, the `.deb` and `.rpm` against `/usr/bin`. Three copies
+of that file would have disagreed within a release.
 
 ## Build dependencies
 

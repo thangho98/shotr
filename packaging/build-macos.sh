@@ -69,7 +69,19 @@ else
 fi
 
 echo "==> Packing the .dmg"
-hdiutil create -volname "shotr" -srcfolder "$APP" -ov -format UDZO \
+# A .dmg holding nothing but the .app leaves people with no indication of where
+# it is supposed to go, and running it from the mounted image is the one thing
+# that must not happen — macOS ties the screen-recording grant to the path, so
+# a shot taken from /Volumes asks for permission again from /Applications. The
+# symlink is what makes the window the drag-across gesture everyone knows, and
+# it needs a staging directory because hdiutil packs a folder as it finds it.
+STAGE="$TMP/dmg"
+mkdir -p "$STAGE"
+# ditto, not cp: it is the copy that keeps a bundle's metadata intact, and the
+# signature applied above is the thing that must survive to the other machine.
+ditto "$APP" "$STAGE/$(basename "$APP")"
+ln -s /Applications "$STAGE/Applications"
+hdiutil create -volname "shotr" -srcfolder "$STAGE" -ov -format UDZO \
     "dist/shotr-$VERSION-macos.dmg"
 echo "==> Done: dist/shotr-$VERSION-macos.dmg"
 echo

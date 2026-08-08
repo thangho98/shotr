@@ -46,30 +46,12 @@ done
 
 echo "==> Installing the desktop entry into $APP_DIR"
 mkdir -p "$APP_DIR"
-# Desktop entries localise in place: `Key[vi]=` is picked up automatically
-# when the session language is Vietnamese, so the launcher matches the app.
-cat > "$APP_DIR/shotr.desktop" <<DESKTOP
-[Desktop Entry]
-Type=Application
-Name=shotr
-GenericName=Screenshot
-GenericName[vi]=Ảnh màn hình
-Comment=Capture and beautify screenshots (runs in the system tray)
-Comment[vi]=Chụp và làm đẹp ảnh màn hình (chạy ở khay hệ thống)
-Exec=$BIN_DIR/shotr
-Icon=shotr
-Terminal=false
-Categories=Graphics;2DGraphics;RasterGraphics;
-Keywords=screenshot;capture;screen;chup;man hinh;anh;
-StartupNotify=true
-StartupWMClass=shotr
-Actions=Capture;
-
-[Desktop Action Capture]
-Name=Capture now
-Name[vi]=Chụp ngay
-Exec=$BIN_DIR/shotr --capture
-DESKTOP
+# One entry, rendered wherever it is needed: here against ~/.local, and against
+# /usr/bin by the .deb and .rpm that build-linux.sh produces. Desktop entries
+# localise in place — `Key[vi]=` is picked up automatically when the session
+# language is Vietnamese — so all of that lives in the template, once.
+sed "s|@EXEC@|$BIN_DIR/shotr|g" packaging/linux/shotr.desktop.in \
+    > "$APP_DIR/shotr.desktop"
 
 command -v update-desktop-database >/dev/null && update-desktop-database "$APP_DIR" || true
 command -v gtk-update-icon-cache >/dev/null && gtk-update-icon-cache -f -t "$ICON_ROOT" 2>/dev/null || true

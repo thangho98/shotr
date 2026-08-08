@@ -1,0 +1,20 @@
+[Desktop Entry]
+Type=Application
+Name=shotr
+GenericName=Screenshot
+GenericName[vi]=Ảnh màn hình
+Comment=Capture and beautify screenshots (runs in the system tray)
+Comment[vi]=Chụp và làm đẹp ảnh màn hình (chạy ở khay hệ thống)
+Exec=@EXEC@
+Icon=shotr
+Terminal=false
+Categories=Graphics;2DGraphics;RasterGraphics;
+Keywords=screenshot;capture;screen;chup;man hinh;anh;
+StartupNotify=true
+StartupWMClass=shotr
+Actions=Capture;
+
+[Desktop Action Capture]
+Name=Capture now
+Name[vi]=Chụp ngay
+Exec=@EXEC@ --capture

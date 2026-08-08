@@ -36,7 +36,7 @@ jobs:
       # desktop distribution has them already, which is why a checkout and a
       # Rust toolchain really is the whole setup on a developer's machine, and
       # is not on a bare runner.
-      - run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libpipewire-0.3-dev libdrm-dev libgbm-dev
+      - run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libpipewire-0.3-dev libdrm-dev libgbm-dev dpkg-dev rpm
       - name: Zero warnings, not few
         run: cargo clippy --all-targets -- -D warnings
       - run: cargo test --release
@@ -64,7 +64,7 @@ jobs:
 
       - name: Linux build deps
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libpipewire-0.3-dev libdrm-dev libgbm-dev
+        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libpipewire-0.3-dev libdrm-dev libgbm-dev dpkg-dev rpm
 
       # choco deploys NSIS into Program Files and shims nothing, so `makensis`
       # is not on PATH. build-windows.sh treats the installer as optional by

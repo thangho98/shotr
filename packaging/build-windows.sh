@@ -34,7 +34,11 @@ echo "==> Done: dist/shotr-$VERSION-windows-x64.zip"
 # The installer needs NSIS. It is optional so the zip is always produced.
 if command -v makensis >/dev/null; then
     echo "==> Building the NSIS installer"
-    makensis -DVERSION="$VERSION" -DSOURCE="../$OUT" packaging/windows/shotr.nsi
+    # NSIS resolves relative paths against the .nsi file, not the working
+    # directory — `OutFile` in there climbs two levels for the same reason.
+    # `../$OUT` looked right and pointed at packaging/dist, so `File` found
+    # nothing and no installer has ever been produced.
+    makensis -DVERSION="$VERSION" -DSOURCE="../../$OUT" packaging/windows/shotr.nsi
     echo "==> Done: dist/shotr-$VERSION-setup.exe"
 else
     echo "==> Skipping the installer: makensis not found (package mingw-w64-nsis / nsis)"
