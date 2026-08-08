@@ -7,7 +7,7 @@ use image::{Rgba, RgbaImage};
 
 use super::ocr_job::OcrState;
 use super::{
-    Mode, OcrMode, PickMode, SWATCH_PX, ShotrApp, Source, Swatch, Zoom, swatch_order, theme,
+    Mode, OcrMode, PickMode, SWATCH_PX, ShotrApp, Swatch, Zoom, swatch_order, theme,
     to_color_image,
 };
 use crate::annotate::Tool;
@@ -60,8 +60,6 @@ impl ShotrApp {
 
     fn select_sidebar(&mut self, ui: &mut egui::Ui) {
         ui.strong(t("Step 1 — pick a region"));
-
-        self.source_picker(ui);
 
         ui.add_space(4.0);
         if !self.windows.is_empty() {
@@ -135,44 +133,6 @@ impl ShotrApp {
         self.history_strip(ui);
     }
 
-    /// Which screen to select from: everything, or one monitor.
-    ///
-    /// This only changes the *view* on the snapshot already taken — it never
-    /// captures again. The user asked for a shot once; showing them a different
-    /// moment because they changed a dropdown would be a different picture.
-    fn source_picker(&mut self, ui: &mut egui::Ui) {
-        if self.monitor_views.len() < 2 {
-            return;
-        }
-        theme::section(ui, t("Image source"));
-
-        let current = match self.source {
-            Source::All => t("All monitors combined").to_string(),
-            Source::Monitor(i) => self
-                .monitor_views
-                .get(i)
-                .map(|v| v.name.clone())
-                .unwrap_or_else(|| tf("Monitor {n}", &[("n", &(i + 1).to_string())])),
-        };
-
-        let mut want = self.source;
-        egui::ComboBox::from_id_salt("source")
-            .selected_text(current)
-            .width(ui.available_width() - 8.0)
-            .show_ui(ui, |ui| {
-                ui.selectable_value(&mut want, Source::All, t("All monitors combined"));
-                for (i, view) in self.monitor_views.iter().enumerate() {
-                    let size = format!("{} ({}×{})", view.name, view.rect[2], view.rect[3]);
-                    ui.selectable_value(&mut want, Source::Monitor(i), size);
-                }
-            });
-
-        if want != self.source {
-            self.source = want;
-            self.apply_source();
-        }
-    }
-
     fn history_strip(&mut self, ui: &mut egui::Ui) {
         if self.history.is_empty() {
             return;
@@ -228,6 +188,8 @@ impl ShotrApp {
     // ------------------------------------------------------------------- edit
 
     fn edit_sidebar(&mut self, ui: &mut egui::Ui) {
+        // The only way back to the windowed Select screen, and that screen is
+        // the only place History, "Open file…" and "From clipboard" live.
         if ui.button(t("Back to selection")).clicked() {
             self.mode = Mode::Select;
             self.sel_start = None;

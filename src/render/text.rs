@@ -64,11 +64,25 @@ pub fn draw(
 }
 
 /// The first system font we can find that covers Vietnamese diacritics.
+///
 /// egui's bundled font does not, so the UI and the watermark share this lookup.
-/// Interface fonts, best first. Inter is a typeface drawn for user interfaces
-/// and carries full Vietnamese coverage; the rest are workhorse fallbacks that
-/// keep shotr running on a machine that has none of the nicer ones.
+/// When it finds nothing the interface still runs, but every tone mark in it
+/// turns into a blank box the moment the language is switched — which is what
+/// happened on macOS and Windows while this list held Linux paths only.
+///
+/// One list for all three platforms, tried in order: a path belonging to
+/// another operating system simply is not there, so the wrong entries cost a
+/// failed `read` each and nothing else. Each group leads with that platform's
+/// interface typeface, because this font labels buttons far more often than it
+/// stamps a watermark, and trails into workhorses that keep shotr running on a
+/// machine with none of the nicer ones.
+///
+/// Every macOS entry was checked on macOS 15: all load through `ab_glyph` —
+/// including the `.ttc` collections, which it does not refuse — and all carry
+/// `ă ơ đ ế ữ ạ`. The Windows entries are the documented system fonts and have
+/// not been verified on a real machine.
 pub const FONT_CANDIDATES: &[&str] = &[
+    // Linux
     "/usr/share/fonts/inter/InterVariable.ttf",
     "/usr/share/fonts/Inter/InterVariable.ttf",
     "/usr/share/fonts/TTF/InterVariable.ttf",
@@ -77,6 +91,16 @@ pub const FONT_CANDIDATES: &[&str] = &[
     "/usr/share/fonts/liberation/LiberationSans-Regular.ttf",
     "/usr/share/fonts/dejavu/DejaVuSans.ttf",
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    // macOS. SFNS is San Francisco, the system interface font.
+    "/System/Library/Fonts/SFNS.ttf",
+    "/System/Library/Fonts/SFNSText.ttf",
+    "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+    "/Library/Fonts/Arial Unicode.ttf",
+    "/System/Library/Fonts/Helvetica.ttc",
+    // Windows
+    r"C:\Windows\Fonts\segoeui.ttf",
+    r"C:\Windows\Fonts\tahoma.ttf",
+    r"C:\Windows\Fonts\arial.ttf",
 ];
 
 pub fn load_system_font() -> Option<(Vec<u8>, FontArc)> {
@@ -88,4 +112,38 @@ pub fn load_system_font() -> Option<(Vec<u8>, FontArc)> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod font_lookup_tests {
+    use super::FONT_CANDIDATES;
+
+    /// This list was Linux-only for a while, and nothing broke loudly: the
+    /// interface kept running and simply drew every Vietnamese tone mark as an
+    /// empty box on the other two platforms. Nothing here can check a font that
+    /// is not on the machine running the tests, so check the one thing that can
+    /// be checked without one — that no platform has been forgotten.
+    #[test]
+    fn every_platform_has_somewhere_to_look() {
+        for (prefix, platform) in [
+            ("/usr/share/fonts/", "Linux"),
+            ("/System/Library/Fonts/", "macOS"),
+            (r"C:\Windows\Fonts\", "Windows"),
+        ] {
+            assert!(
+                FONT_CANDIDATES.iter().any(|p| p.starts_with(prefix)),
+                "no font path for {platform}, so its interface loses every Vietnamese diacritic"
+            );
+        }
+    }
+
+    #[test]
+    fn the_paths_are_absolute() {
+        for path in FONT_CANDIDATES {
+            assert!(
+                path.starts_with('/') || path.starts_with("C:\\"),
+                "{path} is relative, so it would resolve against the working directory"
+            );
+        }
+    }
 }

@@ -1,7 +1,6 @@
 pub mod annotate;
 pub mod app;
 pub mod capture;
-#[cfg(target_os = "linux")]
 pub mod daemon;
 pub mod export;
 pub mod history;
@@ -10,7 +9,6 @@ pub mod ipc;
 pub mod ocr;
 pub mod render;
 pub mod settings;
-#[cfg(target_os = "linux")]
 pub mod tray;
 pub mod wallpaper;
 pub mod winlist;

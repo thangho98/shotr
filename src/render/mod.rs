@@ -7,6 +7,7 @@
 
 pub mod background;
 pub mod frame;
+pub mod icon;
 pub mod text;
 pub mod watermark;
 

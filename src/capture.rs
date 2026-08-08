@@ -102,6 +102,84 @@ fn scaled_origin(rx: i32, ry: i32, reported_w: u32, captured_w: u32) -> (i32, i3
     )
 }
 
+/// Which monitor the pointer is on, as an index into [`capture_shots`].
+///
+/// macOS only, and only because the picker window has to be placed by hand
+/// there: `with_fullscreen` is *native* fullscreen on macOS, which throws the
+/// window into a Space of its own, swoosh animation included — the opposite of
+/// an overlay you drag a rectangle on. Windows and Wayland get a borderless
+/// surface on the monitor that already has focus, so neither needs this.
+#[cfg(target_os = "macos")]
+pub fn monitor_under_cursor() -> Option<usize> {
+    let (x, y) = cursor_point()?;
+    // Both sides of this are `CGGetActiveDisplayList` order, so the index is the
+    // one `capture_shots` and `views_for` will use.
+    let target = xcap::Monitor::from_point(x, y).ok()?.id().ok()?;
+    xcap::Monitor::all()
+        .ok()?
+        .iter()
+        .position(|m| m.id().ok() == Some(target))
+}
+
+/// One monitor's rectangle in the units a window position is given in.
+///
+/// The warning at the top of this file does not apply here: it is about the
+/// Linux backend. On macOS these four come straight from `CGDisplayBounds`,
+/// which is logical points with the primary display's top-left at the origin —
+/// exactly what winit wants.
+#[cfg(target_os = "macos")]
+pub fn monitor_bounds(index: usize) -> Option<[f32; 4]> {
+    let monitors = xcap::Monitor::all().ok()?;
+    let m = monitors.get(index)?;
+    Some([
+        m.x().ok()? as f32,
+        m.y().ok()? as f32,
+        m.width().ok()? as f32,
+        m.height().ok()? as f32,
+    ])
+}
+
+/// Where the pointer is, in the same top-left-origin points as
+/// [`monitor_bounds`].
+///
+/// Declared by hand rather than adding a CoreGraphics binding, the way `ipc`
+/// declares the Win32 calls it needs. `CGEventCreate(NULL)` snapshots the
+/// current event state, and its location is the pointer whether or not a button
+/// is down — unlike `NSEvent`, it needs no run loop and no main thread, which
+/// matters because this runs before any window exists.
+#[cfg(target_os = "macos")]
+fn cursor_point() -> Option<(i32, i32)> {
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct CGPoint {
+        x: f64,
+        y: f64,
+    }
+
+    #[link(name = "CoreGraphics", kind = "framework")]
+    unsafe extern "C" {
+        fn CGEventCreate(source: *mut std::ffi::c_void) -> *mut std::ffi::c_void;
+        fn CGEventGetLocation(event: *mut std::ffi::c_void) -> CGPoint;
+    }
+
+    // `CGEventCreate` hands back a retained CFTypeRef, and the release for it
+    // lives in a different framework.
+    #[link(name = "CoreFoundation", kind = "framework")]
+    unsafe extern "C" {
+        fn CFRelease(cf: *mut std::ffi::c_void);
+    }
+
+    unsafe {
+        let event = CGEventCreate(std::ptr::null_mut());
+        if event.is_null() {
+            return None;
+        }
+        let p = CGEventGetLocation(event);
+        CFRelease(event);
+        Some((p.x as i32, p.y as i32))
+    }
+}
+
 /// Paste every monitor into one virtual-desktop image, normalised so the
 /// top-left of the whole arrangement is `(0, 0)`.
 ///

@@ -30,6 +30,26 @@ ksni = { version = "0.3.6", default-features = false, features = ["blocking", "a
 wayland-client = "0.31"
 wayland-protocols = { version = "0.32", features = ["client", "staging"] }
 
+# Windows and macOS: `tray-icon` speaks Shell_NotifyIcon and NSStatusItem. It is
+# deliberately *not* used on Linux — there it hard-requires GTK3, libxdo and
+# libappindicator, which is exactly the C dependency ksni lets this project do
+# without. Default features off for the same reason: they are the Linux ones.
+#
+# The tray needs a platform event loop on its own thread, so winit comes with
+# it. That is not a new dependency in practice — eframe already pulls the same
+# 0.30 in — but the daemon uses it directly, so it is declared directly.
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+tray-icon = { version = "0.24.2", default-features = false }
+winit = "0.30.13"
+
+# macOS-only: one class, `NSRunningApplication`, to bring a window's application
+# forward before photographing it. Not a new dependency in practice — xcap
+# already builds this exact version for its own AppKit calls, and cargo unions
+# the features — but `winlist` uses it directly, so it is declared directly.
+# MIT, which the GPL can absorb.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-app-kit = { version = "0.3.2", features = ["NSRunningApplication"] }
+
 [profile.release]
 # The OCR stack (rten) drags in a lot of symbols; stripping roughly halves the
 # installed binary and costs nothing at runtime.

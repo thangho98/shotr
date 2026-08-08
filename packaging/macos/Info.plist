@@ -10,11 +10,15 @@
     <key>CFBundleExecutable</key>        <string>shotr</string>
     <key>CFBundleIconFile</key>          <string>shotr</string>
     <key>CFBundlePackageType</key>       <string>APPL</string>
+    <key>CFBundleDevelopmentRegion</key> <string>en</string>
     <key>LSMinimumSystemVersion</key>    <string>11.0</string>
     <key>NSHighResolutionCapable</key>   <true/>
     <!-- Screen capture on macOS needs explicit consent; without this key the
-         system prompt has no explanation and users deny it. -->
+         system prompt has no explanation and users deny it. The system reads it
+         before the app runs, so `t()` cannot reach it: the string below is the
+         English source, and `*.lproj/InfoPlist.strings` overrides it per
+         language the same way `Name[vi]=` localises the Linux desktop entry. -->
     <key>NSScreenCaptureUsageDescription</key>
-    <string>shotr cần quyền quay/chụp màn hình để chụp ảnh màn hình.</string>
+    <string>shotr needs screen recording permission to capture your screen.</string>
 </dict>
 </plist>

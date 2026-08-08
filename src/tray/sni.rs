@@ -15,20 +15,8 @@ use ksni::menu::{StandardItem, SubMenu};
 use ksni::{Icon, MenuItem};
 use std::sync::mpsc::{Receiver, Sender, channel};
 
-use crate::render::background::{BG_PRESETS, mesh};
-use crate::render::frame::rounded_coverage;
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Command {
-    /// Grab the screen, then let the user drag out a region.
-    CaptureRegion,
-    /// Grab the whole screen and go straight to the editor.
-    CaptureFull,
-    /// Drag a region on one specific monitor, at 1:1.
-    CaptureMonitor(usize),
-    OpenFile,
-    Quit,
-}
+use super::{Command, POLL};
+use crate::render::icon::icon_image;
 
 struct ShotrTray {
     tx: Sender<Command>,
@@ -69,25 +57,26 @@ impl ksni::Tray for ShotrTray {
         self.send(Command::CaptureRegion);
     }
 
+    /// The three ways to choose what gets captured, and nothing else. The
+    /// editor deliberately offers no way to change its mind afterwards, so this
+    /// menu is the whole decision.
     fn menu(&self) -> Vec<MenuItem<Self>> {
         vec![
             StandardItem {
-                label: t("Pick a region…").into(),
+                label: t("Capture a region…").into(),
                 activate: Box::new(|t: &mut Self| t.send(Command::CaptureRegion)),
                 ..Default::default()
             }
             .into(),
-            StandardItem {
-                label: t("Whole screen").into(),
-                activate: Box::new(|t: &mut Self| t.send(Command::CaptureFull)),
+            SubMenu {
+                label: t("Capture a whole screen").into(),
+                submenu: screen_items(),
                 ..Default::default()
             }
             .into(),
-            // Picking one screen keeps the picker at 1:1. The default capture
-            // spans every monitor, which has to shrink to fit one window.
             SubMenu {
-                label: t("A single monitor…").into(),
-                submenu: monitor_items(),
+                label: t("Capture a window").into(),
+                submenu: window_items(),
                 ..Default::default()
             }
             .into(),
@@ -122,29 +111,59 @@ impl ksni::Tray for ShotrTray {
     }
 }
 
-/// One entry per monitor. Built fresh each time the menu opens, so plugging a
-/// screen in shows up without restarting shotr. Listing monitors does not
-/// capture anything, so this is cheap.
-fn monitor_items() -> Vec<MenuItem<ShotrTray>> {
+/// Every screen at once, then one entry per monitor.
+///
+/// Built fresh each time the menu opens, so a screen plugged in later shows up
+/// without restarting shotr. Listing monitors captures nothing, so this is
+/// cheap enough to do on every open.
+fn screen_items() -> Vec<MenuItem<ShotrTray>> {
+    let mut items: Vec<MenuItem<ShotrTray>> = vec![
+        StandardItem {
+            label: t("All screens together").into(),
+            activate: Box::new(|t: &mut ShotrTray| t.send(Command::CaptureFull)),
+            ..Default::default()
+        }
+        .into(),
+    ];
     let monitors = crate::capture::list_monitors();
     if monitors.is_empty() {
+        return items;
+    }
+    items.push(MenuItem::Separator);
+    items.extend(monitors.into_iter().map(|m| {
+        let index = m.index;
+        StandardItem {
+            label: format!("{} — {}", index + 1, m.name),
+            activate: Box::new(move |t: &mut ShotrTray| t.send(Command::CaptureMonitor(index))),
+            ..Default::default()
+        }
+        .into()
+    }));
+    items
+}
+
+/// One entry per window, listed the moment the menu opens — any earlier and it
+/// would offer windows that have since closed.
+fn window_items() -> Vec<MenuItem<ShotrTray>> {
+    let windows = crate::winlist::list();
+    if windows.is_empty() {
         return vec![
             StandardItem {
-                label: t("(no monitors could be read)").into(),
+                label: t("(no windows could be read)").into(),
                 enabled: false,
                 ..Default::default()
             }
             .into(),
         ];
     }
-    monitors
+    windows
         .into_iter()
-        .map(|m| {
-            let index = m.index;
+        .map(|w| {
+            let id = w.identifier.clone();
             StandardItem {
-                label: format!("{} — {}", index + 1, m.name),
+                label: w.label(),
                 activate: Box::new(move |t: &mut ShotrTray| {
-                    t.send(Command::CaptureMonitor(index))
+                    t.send(Command::CaptureWindow(id.clone()))
                 }),
                 ..Default::default()
             }
@@ -160,7 +179,7 @@ pub struct TrayHandle {
 
 /// Register a tray icon. Returns `None` when no SNI host is running, which is
 /// normal on plain wlroots sessions and on GNOME without an extension.
-pub fn spawn_headless() -> Option<(TrayHandle, Receiver<Command>)> {
+fn spawn_headless() -> Option<(TrayHandle, Receiver<Command>)> {
     let (tx, rx) = channel();
     let tray = ShotrTray { tx };
     match tray.spawn() {
@@ -169,44 +188,33 @@ pub fn spawn_headless() -> Option<(TrayHandle, Receiver<Command>)> {
     }
 }
 
-/// The app icon: a rounded square in shotr's gradient with a camera lens
-/// punched into it. Drawn in code so no image file has to ship with the binary
-/// — the same pixels feed the tray and the `.desktop` launcher icon.
-pub fn icon_image(size: u32) -> image::RgbaImage {
-    let gradient = mesh(size, size, &BG_PRESETS[4]); // "Love"
-    let radius = (size as f32 * 0.22).round() as u32;
-    let centre = size as f32 / 2.0;
-    let lens_outer = size as f32 * 0.30;
-    let lens_inner = size as f32 * 0.17;
+/// Own the thread until the user quits, and return the process exit code.
+///
+/// `tick` sees each command the menu produced, and `None` on every idle pass —
+/// which is where the daemon checks its socket. Returning `false` stops the
+/// loop. ksni runs its own D-Bus thread, so nothing here needs an event loop.
+pub fn run(mut tick: impl FnMut(Option<Command>) -> bool) -> i32 {
+    let Some((_handle, commands)) = spawn_headless() else {
+        eprintln!(
+            "Không tìm thấy tray (StatusNotifierItem) trên desktop này.\n\
+             Dùng trực tiếp: shotr --capture"
+        );
+        return 1;
+    };
 
-    let mut out = image::RgbaImage::new(size, size);
-    for y in 0..size {
-        for x in 0..size {
-            let cov = rounded_coverage(x, y, size, size, radius);
-            let px = gradient.get_pixel(x, y).0;
-            let (mut r, mut g, mut b) = (px[0] as f32, px[1] as f32, px[2] as f32);
+    eprintln!("shotr is running in the system tray. Click the icon to capture.");
 
-            // Distance from the centre decides where the lens sits.
-            let dx = x as f32 + 0.5 - centre;
-            let dy = y as f32 + 0.5 - centre;
-            let d = (dx * dx + dy * dy).sqrt();
-
-            let ring = smooth_band(d, lens_inner, lens_outer);
-            if ring > 0.0 {
-                r += (255.0 - r) * ring;
-                g += (255.0 - g) * ring;
-                b += (255.0 - b) * ring;
+    loop {
+        while let Ok(command) = commands.try_recv() {
+            if !tick(Some(command)) {
+                return 0;
             }
-
-            let to_u8 = |v: f32| v.round().clamp(0.0, 255.0) as u8;
-            out.put_pixel(
-                x,
-                y,
-                image::Rgba([to_u8(r), to_u8(g), to_u8(b), to_u8(cov * 255.0)]),
-            );
         }
+        if !tick(None) {
+            return 0;
+        }
+        std::thread::sleep(POLL);
     }
-    out
 }
 
 /// The same icon as ARGB32 in network byte order, which is what SNI wants.
@@ -228,13 +236,6 @@ fn icon(size: u32) -> Icon {
         height: size as i32,
         data,
     }
-}
-
-/// 1.0 inside the annulus between `inner` and `outer`, feathered by a pixel.
-fn smooth_band(d: f32, inner: f32, outer: f32) -> f32 {
-    let outer_edge = (outer - d).clamp(0.0, 1.0);
-    let inner_edge = (d - inner).clamp(0.0, 1.0);
-    outer_edge.min(inner_edge)
 }
 
 #[cfg(test)]
@@ -273,12 +274,5 @@ mod tests {
         let on_ring = rgb(centre + (size as f32 * 0.24) as u32, centre);
         let inside = rgb(centre, centre);
         assert!(on_ring > inside, "ring {on_ring} should outshine {inside}");
-    }
-
-    #[test]
-    fn band_is_empty_outside_and_full_between() {
-        assert_eq!(smooth_band(0.0, 5.0, 10.0), 0.0);
-        assert_eq!(smooth_band(20.0, 5.0, 10.0), 0.0);
-        assert_eq!(smooth_band(7.5, 5.0, 10.0), 1.0);
     }
 }

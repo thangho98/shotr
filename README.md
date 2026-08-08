@@ -27,24 +27,48 @@ Grab a build from Releases, or make one:
 ```bash
 bash packaging/build-windows.sh   # .zip, plus setup.exe when NSIS is present
 bash packaging/build-macos.sh     # universal .app inside a .dmg
+bash packaging/install-macos.sh   # that .app into /Applications
 ```
+
+Install it rather than running it out of `dist/`: the build script clears that
+directory each time, and macOS ties screen-recording permission to where the app
+lives.
 
 Neither artefact is signed, so both systems warn on first launch. On macOS,
 right-click the app and choose Open.
 
+shotr lives in the notification area on Windows and in the menu bar on macOS,
+the same as it does in the Linux tray. It takes no Dock icon on macOS while it
+is sitting there.
+
 ## Usage
 
+The tray menu is where you say what to capture:
+
+| | |
+|---|---|
+| **Capture a region…** | freezes the screen, then you drag a rectangle on whichever monitor the pointer is on |
+| **Capture a whole screen ▸** | all screens together, or one of them by name |
+| **Capture a window ▸** | the windows open right now, listed by title |
+
+That choice is made once, before anything is grabbed. The editor then works on
+what it was given — it has no source dropdown, by design.
+
+The same choices from a terminal or a keyboard shortcut:
+
 ```
-shotr                       run in the system tray (Linux)
+shotr                       run in the system tray
 shotr --capture             capture, then drag out a region
 shotr --capture --full      capture everything, straight to the editor
-shotr --capture --monitor N open on monitor N
+shotr --capture --monitor N one monitor, straight to the editor
+shotr --capture --window ID one window, straight to the editor
 shotr --open [FILE]         open an existing image
 ```
 
 Wayland gives no application a global key grab, so the shortcut has to come from
 the desktop. On COSMIC: Settings → Keyboard → Shortcuts → Custom, with the
-command `shotr --capture`.
+command `shotr --capture`. Running that while shotr is already in the tray pokes
+the process that is up rather than starting a second one — on every platform.
 
 ### Editor controls
 
@@ -64,7 +88,10 @@ command `shotr --capture`.
 **Capture** — the whole desktop, a dragged region, or a single window. With
 several monitors it captures once and cuts each screen out of that one snapshot,
 so every view shows the same instant. A window is copied from its own buffer, so
-one sitting **behind another still comes out whole**.
+one sitting **behind another still comes out whole**. On macOS the window is
+brought to the front first: a window parked in Stage Manager is not really on
+screen, and every tool that asks the system for it — Apple's `screencapture`
+included — gets the tilted little preview instead of the window.
 
 **Beautify** — 19 gradient presets, a background generated from the image's own
 colours, the desktop wallpaper, or a colour or image of your own. Padding, an
@@ -103,7 +130,7 @@ read the image.
 ## Development
 
 ```bash
-cargo test                   # 155 tests; no network, no GPU, no display
+cargo test                   # 163 tests; no network, no GPU, no display
 cargo clippy --all-targets   # must be zero warnings
 ```
 

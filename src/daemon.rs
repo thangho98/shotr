@@ -1,15 +1,19 @@
 //! Tray-only background mode.
 //!
 //! This process owns the tray icon and nothing else — it never opens a window.
-//! That is the whole point: on Wayland a client cannot hide itself, so the only
-//! way to keep shotr out of its own screenshot is for no shotr window to exist
-//! when the shutter fires. Each capture therefore runs as a fresh short-lived
-//! process that grabs the screen *before* it opens anything.
+//! On Wayland that is not a style choice: a client cannot hide itself, so the
+//! only way to keep shotr out of its own screenshot is for no shotr window to
+//! exist when the shutter fires. Each capture therefore runs as a fresh
+//! short-lived process that grabs the screen *before* it opens anything.
+//!
+//! Windows and macOS could hide a window instead, but they take the same route.
+//! One capture path that is known to work everywhere beats two, and the tray
+//! wants a resident process on those platforms regardless.
 
-use std::process::Command;
+use std::process::Command as Process;
 
 use crate::ipc;
-use crate::tray;
+use crate::tray::{self, Command};
 
 /// Run until the tray asks us to quit. Returns the process exit code.
 pub fn run() -> i32 {
@@ -23,37 +27,31 @@ pub fn run() -> i32 {
         ipc::Instance::Primary(rx) => rx,
     };
 
-    let Some((_handle, commands)) = tray::spawn_headless() else {
-        eprintln!(
-            "Không tìm thấy tray (StatusNotifierItem) trên desktop này.\n\
-             Dùng trực tiếp: shotr --capture"
-        );
-        return 1;
-    };
-
-    eprintln!("shotr is running in the system tray. Click the icon to capture.");
-
-    loop {
-        // Two sources, one loop: the tray menu and later `shotr` launches.
-        if let Ok(command) = commands.try_recv() {
-            match command {
-                tray::Command::CaptureRegion => spawn_shot(&["--capture"]),
-                tray::Command::CaptureFull => spawn_shot(&["--capture", "--full"]),
-                tray::Command::CaptureMonitor(i) => {
-                    spawn_shot(&["--capture", "--monitor", &i.to_string()])
+    // Two sources, one loop: the tray menu, and later `shotr` launches. Which
+    // loop it is differs by platform — see `tray::run`.
+    tray::run(|command| {
+        match command {
+            Some(Command::CaptureRegion) => spawn_shot(&["--capture"]),
+            Some(Command::CaptureFull) => spawn_shot(&["--capture", "--full"]),
+            Some(Command::CaptureMonitor(i)) => {
+                spawn_shot(&["--capture", "--full", "--monitor", &i.to_string()])
+            }
+            // The identifier survives the trip because both backends hand out
+            // one meant to be shared: `ext_foreign_toplevel_list_v1` says so in
+            // as many words, and elsewhere it is the window id the system uses.
+            Some(Command::CaptureWindow(id)) => spawn_shot(&["--capture", "--window", &id]),
+            Some(Command::OpenFile) => spawn_shot(&["--open"]),
+            Some(Command::Quit) => return false,
+            None => {
+                if let Ok(request) = requests.try_recv() {
+                    match request {
+                        ipc::Request::Capture | ipc::Request::Show => spawn_shot(&["--capture"]),
+                    }
                 }
-                tray::Command::OpenFile => spawn_shot(&["--open"]),
-                tray::Command::Quit => return 0,
             }
         }
-        if let Ok(request) = requests.try_recv() {
-            match request {
-                ipc::Request::Capture => spawn_shot(&["--capture"]),
-                ipc::Request::Show => spawn_shot(&["--capture"]),
-            }
-        }
-        std::thread::sleep(std::time::Duration::from_millis(80));
-    }
+        true
+    })
 }
 
 /// Launch a capture process. Detached: the daemon must not block on it, and it
@@ -66,7 +64,7 @@ fn spawn_shot(args: &[&str]) {
             return;
         }
     };
-    match Command::new(exe).args(args).spawn() {
+    match Process::new(exe).args(args).spawn() {
         Ok(_child) => {}
         Err(e) => eprintln!("Could not run shotr {}: {e}", args.join(" ")),
     }

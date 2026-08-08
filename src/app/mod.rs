@@ -51,8 +51,12 @@ impl Source {
 pub enum Start {
     /// Fullscreen region picker over a screenshot taken before the window.
     Picker(RgbaImage),
-    /// Straight to the editor with this image.
+    /// Straight to the editor with a snapshot of the whole desktop. The editor
+    /// keeps it, not just the part being edited — see [`ShotrApp::new`].
     Editor(RgbaImage),
+    /// Straight to the editor with an image that is not the desktop: one
+    /// window, copied out of its own buffer.
+    Window(RgbaImage),
     OpenPath(PathBuf),
     OpenDialog,
 }
@@ -370,6 +374,19 @@ impl ShotrApp {
         match start {
             Start::Picker(shot) => app.adopt_initial(shot),
             Start::Editor(shot) => {
+                // The editor keeps the desktop snapshot, not only the image it
+                // is editing. Two things need it: `--monitor N` narrows a full
+                // capture to one screen through `apply_source`, and "Back to
+                // selection" hands the picker something to select from. Left as
+                // the startup placeholder, both cropped outside the image.
+                app.desktop_full = shot;
+                app.apply_source();
+                app.shot_full = app.capture_full.clone();
+                app.enter_edit();
+            }
+            // No desktop snapshot to seed: a window is not a rectangle of the
+            // screen, which is the whole reason it is captured separately.
+            Start::Window(shot) => {
                 app.shot_full = shot;
                 app.enter_edit();
             }
@@ -441,14 +458,7 @@ impl ShotrApp {
             Source::All => None,
             Source::Monitor(i) => self.monitor_views.get(i).map(|v| v.rect),
         };
-        self.capture_full = match rect {
-            Some([x, y, w, h]) if w > 0 && h > 0 => {
-                image::imageops::crop_imm(&self.desktop_full, x, y, w, h).to_image()
-            }
-            // An unknown monitor falls back to the whole desktop rather than
-            // showing nothing.
-            _ => self.desktop_full.clone(),
-        };
+        self.capture_full = cut_monitor(&self.desktop_full, rect);
         self.capture_preview = make_preview(&self.capture_full, 1100).0;
         self.raw_dirty = true;
         self.sel_start = None;
@@ -503,6 +513,11 @@ impl ShotrApp {
         self.picking_fullscreen = false;
         ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
         ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(true));
+        // Where the picker is an always-on-top overlay rather than a fullscreen
+        // window, the editor it becomes must stop hovering over everything.
+        ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(
+            egui::WindowLevel::Normal,
+        ));
         ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(1280.0, 820.0)));
     }
 
@@ -722,7 +737,11 @@ impl ShotrApp {
         } else {
             &self.capture_preview
         };
-        let color = to_color_image(source);
+        // `capture_full` is the one texture with no bound on it: the others go
+        // through `make_preview` first. A stitched desktop can outgrow what the
+        // GPU accepts, so it is checked here and nowhere else.
+        let shrunk = fit_texture(source, ctx.input(|i| i.max_texture_side) as u32);
+        let color = to_color_image(shrunk.as_ref().unwrap_or(source));
         match &mut self.raw_texture {
             Some(t) => t.set(color, egui::TextureOptions::LINEAR),
             None => {
@@ -1016,6 +1035,52 @@ impl ShotrApp {
 
 // -------------------------------------------------------------------- helpers
 
+/// Cut one monitor out of the desktop snapshot. `None` asks for all of it.
+///
+/// A rectangle that does not lie wholly inside the image is ignored rather than
+/// clamped. `crop_imm` clamps, and clamping an origin that is already past the
+/// right edge leaves a **0×0** image — which cannot be uploaded as a texture and
+/// takes the process with it. That is not hypothetical: the editor used to start
+/// without a desktop snapshot at all, so every monitor rectangle missed. Falling
+/// back to the whole desktop is the rule an unknown monitor index already
+/// followed, and it shows something rather than nothing.
+fn cut_monitor(desktop: &RgbaImage, rect: Option<[u32; 4]>) -> RgbaImage {
+    match rect {
+        Some([x, y, w, h])
+            if w > 0
+                && h > 0
+                && x.saturating_add(w) <= desktop.width()
+                && y.saturating_add(h) <= desktop.height() =>
+        {
+            image::imageops::crop_imm(desktop, x, y, w, h).to_image()
+        }
+        _ => desktop.clone(),
+    }
+}
+
+/// Shrink `img` until neither side exceeds `limit`. `None` when it already
+/// fits, so the ordinary case copies nothing.
+///
+/// The ceiling is the GPU's, not egui's, and egui panics rather than refusing:
+/// three monitors stitched side by side came to 8616px against a limit of 8192
+/// and took the process down with `abort()`. Only the picture shrinks — the
+/// selection is measured against `capture_full`, so a crop stays exact however
+/// much this scales.
+fn fit_texture(img: &RgbaImage, limit: u32) -> Option<RgbaImage> {
+    let longest = img.width().max(img.height());
+    if longest <= limit {
+        return None;
+    }
+    let scale = limit as f32 / longest as f32;
+    let fit = |side: u32| (((side as f32 * scale).round() as u32).max(1)).min(limit);
+    Some(image::imageops::resize(
+        img,
+        fit(img.width()),
+        fit(img.height()),
+        image::imageops::FilterType::Triangle,
+    ))
+}
+
 pub(crate) fn to_color_image(img: &RgbaImage) -> egui::ColorImage {
     egui::ColorImage::from_rgba_unmultiplied(
         [img.width() as usize, img.height() as usize],
@@ -1041,6 +1106,111 @@ fn setup_fonts(ctx: &egui::Context) -> Option<FontArc> {
     }
     ctx.set_fonts(fonts);
     Some(font)
+}
+
+#[cfg(test)]
+mod monitor_cut_tests {
+    use super::cut_monitor;
+    use image::RgbaImage;
+
+    #[test]
+    fn a_monitor_inside_the_snapshot_is_cut_out_of_it() {
+        let desktop = RgbaImage::new(8616, 4320);
+        let one = cut_monitor(&desktop, Some([5160, 0, 3456, 2234]));
+        assert_eq!(
+            (one.width(), one.height()),
+            (3456, 2234),
+            "the picker would show the wrong screen"
+        );
+    }
+
+    #[test]
+    fn a_rectangle_that_misses_the_snapshot_yields_the_whole_desktop() {
+        // The editor opened with a 640x360 placeholder in place of the desktop,
+        // so picking the second monitor cropped at x=5160 inside it. `crop_imm`
+        // clamps rather than refusing, which made that a 0x0 image, and a
+        // zero-sized texture ends the process.
+        let placeholder = RgbaImage::new(640, 360);
+        let out = cut_monitor(&placeholder, Some([5160, 0, 3456, 2234]));
+        assert_eq!(
+            (out.width(), out.height()),
+            (640, 360),
+            "a zero-sized crop reached the GPU and killed the editor"
+        );
+    }
+
+    #[test]
+    fn a_rectangle_hanging_over_the_edge_yields_the_whole_desktop() {
+        // Half in bounds is still not a screen, and clamping it would show a
+        // sliver of the wrong one.
+        let desktop = RgbaImage::new(1920, 1080);
+        let out = cut_monitor(&desktop, Some([1600, 0, 1920, 1080]));
+        assert_eq!(
+            (out.width(), out.height()),
+            (1920, 1080),
+            "a clamped crop passes a rectangle the caller never asked for"
+        );
+    }
+
+    #[test]
+    fn no_rectangle_means_every_monitor() {
+        let desktop = RgbaImage::new(1920, 1080);
+        let out = cut_monitor(&desktop, None);
+        assert_eq!(
+            (out.width(), out.height()),
+            (1920, 1080),
+            "'All monitors combined' must not crop"
+        );
+    }
+}
+
+#[cfg(test)]
+mod texture_fit_tests {
+    use super::fit_texture;
+    use image::RgbaImage;
+
+    #[test]
+    fn an_image_within_the_limit_is_left_alone() {
+        let img = RgbaImage::new(1920, 1080);
+        assert!(
+            fit_texture(&img, 8192).is_none(),
+            "copying an image that already fits would waste a frame's worth of work"
+        );
+    }
+
+    #[test]
+    fn the_three_monitor_desktop_that_crashed_now_fits() {
+        // 5160x2160 + 3456x2234 + 3840x2160 stitched, against a 8192 GPU limit.
+        // egui does not clamp this, it panics and aborts the process.
+        let img = RgbaImage::new(8616, 4320);
+        let fitted = fit_texture(&img, 8192).expect("8616 is over the limit and must be shrunk");
+        assert!(
+            fitted.width() <= 8192 && fitted.height() <= 8192,
+            "still {}x{}, which is what took the process down",
+            fitted.width(),
+            fitted.height()
+        );
+        // 8616:4320 is 1.9944; a shifted aspect would misplace the selection
+        // rectangle drawn over the shot.
+        let before = 8616.0 / 4320.0;
+        let after = fitted.width() as f32 / fitted.height() as f32;
+        assert!(
+            (before - after).abs() < 0.01,
+            "aspect drifted from {before} to {after}, so the picker would be stretched"
+        );
+    }
+
+    #[test]
+    fn a_tall_desktop_is_bounded_too() {
+        // Monitors stacked vertically hit the same wall on the other axis.
+        let fitted = fit_texture(&RgbaImage::new(2000, 9000), 8192)
+            .expect("9000 is over the limit and must be shrunk");
+        assert!(
+            fitted.height() <= 8192,
+            "height {} still exceeds the limit",
+            fitted.height()
+        );
+    }
 }
 
 #[cfg(test)]

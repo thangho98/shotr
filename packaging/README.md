@@ -8,6 +8,7 @@ repeatedly.
 | `build-linux.sh` | Linux | `shotr-VERSION-linux-ARCH.tar.gz` (binary + `install.sh`) |
 | `build-windows.sh` | Windows, or Linux with mingw-w64 | `.zip`, plus `setup.exe` when `makensis` is present |
 | `build-macos.sh` | macOS only | universal `.app` inside a `.dmg` |
+| `install-macos.sh` | macOS only | copies that `.app` into `/Applications` |
 
 ## Why these formats
 
@@ -49,3 +50,47 @@ first launch. Signing needs paid certificates:
 
 Until then the honest thing is to say so in the release notes rather than let
 users hit a scary dialog with no warning.
+
+### Developing on macOS: sign anyway, or fight TCC forever
+
+A paid certificate is needed to *ship*. Keeping macOS permissions while you work
+needs only a free self-signed one, and without it the loop is maddening: macOS
+records a Screen Recording or Files-and-Folders grant against the code
+signature, the linker's ad-hoc signature is computed from the binary's own
+bytes, so **every rebuild is a different app** and every permission has to be
+granted again. Granting it harder does not help — it was never the same app
+twice.
+
+Make the certificate once, in Keychain Access → Certificate Assistant → Create a
+Certificate: any name, *Self Signed Root*, certificate type **Code Signing**.
+Then:
+
+```bash
+export SHOTR_SIGN_IDENTITY="shotr-dev"   # whatever you named it
+bash packaging/build-macos.sh
+```
+
+`build-macos.sh` signs with it when that variable is set and stays ad-hoc when
+it is not, so CI is unaffected. If permissions were already granted to the
+ad-hoc builds, clear the stale entries once with
+`tccutil reset ScreenCapture dev.shotr.app` before granting again.
+
+**Then quit shotr from its own menu, and only then start it again.** macOS
+decides Screen Recording once per process and caches the answer for that
+process's lifetime, so a daemon that was already running when the switch was
+flipped stays denied — and since every shot is a *child* of that daemon, every
+shot re-asks. The permission panel lists shotr as allowed throughout, which
+makes it look as though the grant is being ignored. It is not: the running
+process predates it.
+
+Quitting is the part that catches people, and it caught us:
+
+- **Opening the app again does not restart it.** The second launch hands its
+  request to the daemon over the socket and exits, so the old, denied process is
+  still the one taking your screenshots. Nothing on screen says so.
+- **The daemon is `Accessory`,** so it has no Dock icon to quit, does not appear
+  in cmd+tab, and Force Quit does not list it.
+
+Its tray menu's *Quit* is the only way out, or `pkill -f MacOS/shotr` from a
+terminal. Grant the permission, quit it *properly*, start it again — in that
+order, or the grant never reaches a process that can use it.
