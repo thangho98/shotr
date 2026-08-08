@@ -1,8 +1,12 @@
 # Wraps an already-built tree; rpmbuild is not asked to compile anything.
 # build-linux.sh stages the files and passes their location as _shotr_stage,
-# because rpmbuild empties %{buildroot} at the start of %install — staging
-# straight into it looks like it should work and silently produces an empty
+# because rpmbuild empties the buildroot before the install section runs —
+# staging straight into it looks like it should work and produces an empty
 # package.
+#
+# Note the doubled percent signs below. rpm expands macros inside comments too,
+# so a bare one here is not a comment, it is a substitution that fails the
+# build with an error pointing at a line that only explains things.
 #
 # Requires: is deliberately absent. rpmbuild reads the ELF and writes it, which
 # is the only version that stays true: the list gained libpipewire the day xcap

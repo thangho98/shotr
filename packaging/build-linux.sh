@@ -97,13 +97,16 @@ fi
 
 if command -v rpmbuild >/dev/null; then
     echo "==> Building the .rpm"
+    # $STAGE comes from `mktemp -d`, which is already absolute — prefixing $PWD
+    # produced /home/runner/work/shotr/shotr//tmp/tmp.XXXX and rpmbuild failed
+    # on a path that reads almost right. Only _rpmdir is relative to here.
     rpmbuild -bb \
-        --define "_topdir $PWD/$STAGE/rpm" \
+        --define "_topdir $STAGE/rpm" \
         --define "_rpmdir $PWD/dist" \
         --define "_rpmfilename shotr-$VERSION.$ARCH.rpm" \
         --define "_shotr_version $VERSION" \
-        --define "_shotr_stage $PWD/$STAGE/tree" \
-        --buildroot "$PWD/$STAGE/buildroot" \
+        --define "_shotr_stage $STAGE/tree" \
+        --buildroot "$STAGE/buildroot" \
         packaging/linux/shotr.spec >/dev/null
     echo "==> Done: dist/shotr-$VERSION.$ARCH.rpm"
 else
