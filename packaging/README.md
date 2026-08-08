@@ -10,6 +10,26 @@ repeatedly.
 | `build-macos.sh` | macOS only | universal `.app` inside a `.dmg` |
 | `install-macos.sh` | macOS only | copies that `.app` into `/Applications` |
 
+## Cutting a release
+
+`.github/workflows/release.yml` runs all three scripts on three runners and
+attaches everything in `dist/` to the GitHub release. Two ways in, both ending
+in the same place:
+
+```bash
+git tag v0.1.0 && git push origin v0.1.0
+```
+
+or write the notes by hand on the Releases page and publish. That second route
+creates the tag as well, so one action fires both triggers — the `concurrency`
+group is what keeps it to a single build, and the workflow *appends* its
+unsigned-artefact warning instead of setting the body, so hand-written notes
+survive.
+
+Bump `version` in `Cargo.toml` before tagging. Every script reads the version
+from there and none of them looks at the tag, so a tag ahead of `Cargo.toml`
+produces a `v0.2.0` release full of files named `0.1.0`.
+
 ## Why these formats
 
 **Linux: a tarball, not an AppImage.** shotr links only libraries any desktop

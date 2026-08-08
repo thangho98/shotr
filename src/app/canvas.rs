@@ -814,18 +814,14 @@ pub(super) fn apply_text_events(
                 match key {
                     egui::Key::Enter => return TextAction::Finish,
                     egui::Key::Escape => return TextAction::Cancel,
-                    egui::Key::Backspace => {
-                        if *caret > 0 {
-                            let from = prev_boundary(text, *caret);
-                            text.replace_range(from..*caret, "");
-                            *caret = from;
-                        }
+                    egui::Key::Backspace if *caret > 0 => {
+                        let from = prev_boundary(text, *caret);
+                        text.replace_range(from..*caret, "");
+                        *caret = from;
                     }
-                    egui::Key::Delete => {
-                        if *caret < text.len() {
-                            let to = next_boundary(text, *caret);
-                            text.replace_range(*caret..to, "");
-                        }
+                    egui::Key::Delete if *caret < text.len() => {
+                        let to = next_boundary(text, *caret);
+                        text.replace_range(*caret..to, "");
                     }
                     egui::Key::ArrowLeft => {
                         *caret = if modifiers.command {

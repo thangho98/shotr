@@ -3,8 +3,18 @@ name: build
 on:
   push:
     tags: ["v*"]
+  # Publishing from the Releases page creates the tag too, so that one action
+  # fires both triggers. The concurrency group below is what keeps it to one
+  # build; without it the same tag would be built twice, in parallel, and both
+  # runs would upload to the same release.
+  release:
+    types: [published]
   workflow_dispatch:
   pull_request:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   # Correctness runs once, on Linux — the test suite touches no platform API, so
@@ -74,9 +84,15 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with: { path: dist, merge-multiple: true }
+      # `append_body`, not `body`: publishing from the Releases page means notes
+      # were written by hand, and replacing them would throw away the reason for
+      # doing it that way. Creating the release from a tag push does not loop
+      # back here — GitHub does not start a workflow from an event raised with
+      # the default GITHUB_TOKEN.
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/*
+          append_body: true
           body: |
             Unsigned. Windows and macOS will warn on first launch.
             macOS: right-click the app and choose Open.
