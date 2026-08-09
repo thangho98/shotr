@@ -42,7 +42,14 @@ pub enum Shot {
 fn args(shot: Shot, out: &Path) -> Vec<String> {
     let mut a = vec!["-x".to_string()];
     match shot {
-        Shot::Region => a.push("-i".into()),
+        // Region carries the window flags too, because space inside Apple's
+        // overlay turns this very command into a window capture. Without `-o`
+        // the shot comes back with the window's own shadow baked in as a
+        // semi-transparent border — measured at 112/76/112/148px around a
+        // 3492×2258 window — which `render` then composites over the background
+        // as a second, far larger shadow sitting well below the window. On a
+        // rectangle both flags are byte-for-byte no-ops, measured.
+        Shot::Region => a.extend(["-i", "-o", "-a"].map(String::from)),
         Shot::Window => {
             a.extend(["-i", "-W", "-o", "-a"].map(String::from));
         }
@@ -197,7 +204,7 @@ mod tests {
     #[test]
     fn each_source_builds_its_own_command_line() {
         let p = Path::new("/tmp/x.png");
-        assert_eq!(args(Shot::Region, p), ["-x", "-i", "/tmp/x.png"]);
+        assert_eq!(args(Shot::Region, p), ["-x", "-i", "-o", "-a", "/tmp/x.png"]);
         assert_eq!(
             args(Shot::Window, p),
             ["-x", "-i", "-W", "-o", "-a", "/tmp/x.png"]
@@ -206,6 +213,22 @@ mod tests {
             !args(Shot::Region, p).contains(&"-r".to_string()),
             "-r only touches dpi metadata and export re-encodes; it must stay off"
         );
+    }
+
+    /// Space in Apple's overlay makes either interactive source a window
+    /// capture, so both must drop the shadow. Losing `-o` on one of them bakes
+    /// the window's own shadow into the shot, and the pipeline then draws its
+    /// own shadow around that — the report was "a huge drop shadow underneath,
+    /// and only when capturing a window".
+    #[test]
+    fn every_interactive_source_drops_the_window_shadow() {
+        let p = Path::new("/tmp/x.png");
+        for shot in [Shot::Region, Shot::Window] {
+            assert!(
+                args(shot, p).contains(&"-o".to_string()),
+                "{shot:?} can end up a window capture, so it must pass -o"
+            );
+        }
     }
 
     /// Off by one here captures the wrong screen without any error.

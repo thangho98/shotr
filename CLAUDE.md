@@ -145,6 +145,16 @@ from a terminal borrows the terminal's grant instead.
 a pixel, and `export` re-encodes so the source dpi never reaches the output file.
 It looks tidy to add. It does nothing.
 
+**Space turns a region capture into a window capture, so the region command line
+has to carry `-o` too.** It did not, and the shot came back with the window's own
+shadow baked in as a semi-transparent border — measured at 112/76/112/148px
+around a 3492×2258 window — which `render` composited over the background and
+then cast its *own* shadow around. It read as "a huge drop shadow underneath,
+only when capturing a window", and the culprit was the *region* command, the one
+the hotkey is bound to. `-o` is honoured under `-i -W`; it was simply absent
+elsewhere. Both flags are byte-for-byte no-ops on a rectangle, measured, so both
+interactive sources now pass both.
+
 **`crop_imm` clamps, and a clamped miss is a 0×0 image.** The editor keeps the
 whole desktop snapshot, not only the image it is editing: `--capture --full
 --monitor N` cuts one screen out of it, and "Back to selection" hands the picker
