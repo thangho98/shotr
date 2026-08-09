@@ -957,8 +957,11 @@ impl ShotrApp {
         ui.add_space(2.0);
         ui.horizontal(|ui| {
             if self.mode == Mode::Edit {
+                // Labelled with the shortcut, so it has to do what the shortcut
+                // does — copy and leave.
                 if ui.button("Copy  Ctrl+C").clicked() {
-                    self.do_copy();
+                    let ctx = ui.ctx().clone();
+                    self.copy_and_close(&ctx);
                 }
                 if ui.button("Save  Ctrl+S").clicked() {
                     self.do_save(None);

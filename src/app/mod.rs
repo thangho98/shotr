@@ -986,16 +986,57 @@ impl eframe::App for ShotrApp {
     }
 }
 
+/// The editor labels every shortcut `Ctrl+…`, on all three platforms — the
+/// bottom bar and the About list both do. egui's `command` is ⌘ on macOS and
+/// Ctrl elsewhere, so matching it alone leaves the physical Ctrl key, the one
+/// those labels name, doing nothing on a Mac: Ctrl+C copied nothing at all.
+/// Accepting either makes the labels true without taking ⌘C away.
+fn editor_modifier(m: &egui::Modifiers) -> bool {
+    m.command || m.ctrl
+}
+
+/// True if the frame asked for a copy, however the platform spelled it.
+///
+/// egui translates the system's copy chord into [`egui::Event::Copy`] and, on
+/// macOS, that is *all* it delivers: ⌘C arrives with no key press at all, only a
+/// release once the chord is over. Watching for the key alone therefore left ⌘C
+/// — the combination every Mac user reaches for first — doing nothing.
+fn copy_requested(events: &[egui::Event]) -> bool {
+    shortcut(events, egui::Key::C, None) || events.iter().any(|e| matches!(e, egui::Event::Copy))
+}
+
+/// True if `key` went down this frame with the editor's modifier held, and with
+/// shift in the state asked for — `None` when shift does not matter.
+///
+/// The modifiers must be read off the *event*, never off `InputState::modifiers`.
+/// That field is the state left at the end of the frame, and a quick tap delivers
+/// the press and the release together: by the time the frame is read the modifier
+/// has already been let go, the frame reports `Modifiers::NONE`, and the shortcut
+/// silently never fires. Measured — a release build coalesced Ctrl+C into one
+/// frame reporting NONE while a debug build, slow enough to split it over two
+/// frames, worked. That difference is what made this look like a signing or
+/// install problem for an afternoon.
+fn shortcut(events: &[egui::Event], key: egui::Key, shift: Option<bool>) -> bool {
+    events.iter().any(|e| {
+        matches!(
+            e,
+            egui::Event::Key { key: k, pressed: true, modifiers, .. }
+                if *k == key
+                    && editor_modifier(modifiers)
+                    && shift.is_none_or(|want| modifiers.shift == want)
+        )
+    })
+}
+
 impl ShotrApp {
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
         let (copy, save, space, undo, redo, delete) = ctx.input(|i| {
-            let cmd = i.modifiers.command;
             (
-                cmd && i.key_pressed(egui::Key::C),
-                cmd && i.key_pressed(egui::Key::S),
+                copy_requested(&i.events),
+                shortcut(&i.events, egui::Key::S, None),
                 i.key_pressed(egui::Key::Space),
-                cmd && !i.modifiers.shift && i.key_pressed(egui::Key::Z),
-                cmd && i.modifiers.shift && i.key_pressed(egui::Key::Z),
+                shortcut(&i.events, egui::Key::Z, Some(false)),
+                shortcut(&i.events, egui::Key::Z, Some(true)),
                 i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace),
             )
         });
@@ -1003,13 +1044,12 @@ impl ShotrApp {
         // Zoom keys, only while the editor is up and nothing is being typed.
         if self.mode == Mode::Edit && !self.typing_text() {
             let (zoom_in, zoom_out, fit, actual) = ctx.input(|i| {
-                let cmd = i.modifiers.command;
                 (
-                    cmd && (i.key_pressed(egui::Key::Plus)
-                        || i.key_pressed(egui::Key::Equals)),
-                    cmd && i.key_pressed(egui::Key::Minus),
-                    cmd && i.key_pressed(egui::Key::Num0),
-                    cmd && i.key_pressed(egui::Key::Num1),
+                    shortcut(&i.events, egui::Key::Plus, None)
+                        || shortcut(&i.events, egui::Key::Equals, None),
+                    shortcut(&i.events, egui::Key::Minus, None),
+                    shortcut(&i.events, egui::Key::Num0, None),
+                    shortcut(&i.events, egui::Key::Num1, None),
                 )
             });
             if zoom_in {
@@ -1027,8 +1067,12 @@ impl ShotrApp {
         }
         match self.mode {
             Mode::Edit => {
-                if copy {
-                    self.do_copy();
+                // The shot is on the clipboard, so the editor has nothing left
+                // to say: closing here is what lets the paste happen in the
+                // window the user was already working in. Typing a label is the
+                // exception — there Ctrl+C belongs to the text field.
+                if copy && !self.typing_text() {
+                    self.copy_and_close(ctx);
                 }
                 if save {
                     self.do_save(None);
@@ -1145,6 +1189,141 @@ pub(crate) fn to_color_image(img: &RgbaImage) -> egui::ColorImage {
         [img.width() as usize, img.height() as usize],
         img.as_raw(),
     )
+}
+
+#[cfg(test)]
+mod shortcut_modifier_tests {
+    use super::editor_modifier;
+    use eframe::egui::Modifiers;
+
+    /// Measured on macOS: Ctrl+C in the editor did nothing, because egui sets
+    /// `command` for ⌘ there and the check looked at `command` alone — while
+    /// the button beside it reads "Copy  Ctrl+C".
+    #[test]
+    fn the_ctrl_key_works_where_command_means_cmd() {
+        let ctrl = Modifiers {
+            ctrl: true,
+            ..Default::default()
+        };
+        assert!(
+            editor_modifier(&ctrl),
+            "Ctrl+C would copy nothing on macOS, though every label promises it"
+        );
+    }
+
+    /// The Mac key people actually reach for has to keep working.
+    #[test]
+    fn the_command_key_still_works() {
+        let cmd = Modifiers {
+            command: true,
+            mac_cmd: true,
+            ..Default::default()
+        };
+        assert!(editor_modifier(&cmd), "Cmd+C stopped copying");
+    }
+
+    /// Otherwise a bare C, typed into anything, would fire every shortcut.
+    #[test]
+    fn no_modifier_is_not_a_shortcut() {
+        assert!(
+            !editor_modifier(&Modifiers::default()),
+            "an unmodified keypress triggered a shortcut"
+        );
+    }
+}
+
+#[cfg(test)]
+mod shortcut_tests {
+    use super::shortcut;
+    use eframe::egui::{Event, Key, Modifiers};
+
+    fn press(key: Key, modifiers: Modifiers) -> Event {
+        Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        }
+    }
+
+    const CTRL: Modifiers = Modifiers {
+        alt: false,
+        ctrl: true,
+        shift: false,
+        mac_cmd: false,
+        command: false,
+    };
+
+    /// The bug this whole function exists for. A quick tap delivers the press
+    /// and the release in one frame, so the frame's own modifier state is back
+    /// to nothing — reading that instead of the event's made Ctrl+C do nothing
+    /// at all in a release build, while a slower debug build worked.
+    #[test]
+    fn a_press_and_release_in_one_frame_still_fires() {
+        let events = vec![
+            press(Key::C, CTRL),
+            Event::Key {
+                key: Key::C,
+                physical_key: None,
+                pressed: false,
+                repeat: false,
+                modifiers: CTRL,
+            },
+        ];
+        assert!(
+            shortcut(&events, Key::C, None),
+            "Ctrl+C copied nothing whenever the tap was quick enough"
+        );
+    }
+
+    #[test]
+    fn a_key_without_the_modifier_is_not_a_shortcut() {
+        let events = vec![press(Key::C, Modifiers::default())];
+        assert!(
+            !shortcut(&events, Key::C, None),
+            "typing a bare C would copy and close the editor"
+        );
+    }
+
+    /// Undo asks for shift off and redo for shift on, off the same key.
+    #[test]
+    fn shift_tells_undo_and_redo_apart() {
+        let shifted = Modifiers { shift: true, ..CTRL };
+        let events = vec![press(Key::Z, shifted)];
+        assert!(
+            shortcut(&events, Key::Z, Some(true)),
+            "Ctrl+Shift+Z stopped redoing"
+        );
+        assert!(
+            !shortcut(&events, Key::Z, Some(false)),
+            "Ctrl+Shift+Z undid instead of redoing"
+        );
+    }
+
+    #[test]
+    fn another_key_does_not_match() {
+        let events = vec![press(Key::S, CTRL)];
+        assert!(!shortcut(&events, Key::C, None), "Ctrl+S triggered the copy");
+    }
+
+    /// Measured on macOS: ⌘C reaches the app as `Event::Copy` and nothing else —
+    /// no key press at all — so watching for the key alone missed it entirely.
+    #[test]
+    fn the_platform_copy_event_counts_as_the_shortcut() {
+        assert!(
+            super::copy_requested(&[Event::Copy]),
+            "Cmd+C did nothing on macOS, where it arrives as no key press at all"
+        );
+    }
+
+    #[test]
+    fn an_ordinary_frame_asks_for_no_copy() {
+        assert!(
+            !super::copy_requested(&[press(Key::S, CTRL)]),
+            "Ctrl+S copied and closed the editor"
+        );
+    }
 }
 
 #[cfg(test)]
