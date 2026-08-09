@@ -289,6 +289,7 @@ static VI: &[(&str, &str)] = &[
     ("macOS reads this permission once when an app starts. After allowing it, quit shotr from the menu bar and start it again.", "macOS chỉ đọc quyền này một lần lúc app khởi động. Sau khi cấp, hãy thoát shotr từ menu bar rồi mở lại."),
     ("shotr cannot record the screen yet", "shotr chưa được phép ghi màn hình"),
     ("shotr — Preferences", "shotr — Tuỳ chọn"),
+    ("then choose Screenshots", "rồi chọn Screenshots"),
     ("{chars} characters copied", "Đã copy {chars} ký tự"),
     ("{keys} now captures a region. Change it in Preferences.", "{keys} giờ dùng để chụp một vùng. Đổi trong Preferences."),
     ("{n} windows. Click one in the list.", "{n} cửa sổ. Bấm một cái trong danh sách giữa màn hình."),

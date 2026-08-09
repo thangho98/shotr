@@ -192,6 +192,13 @@ fn row(ui: &mut egui::Ui, prefs: &mut Prefs, state: &mut State, action: Action, 
             if ui.button(t("Open System Settings")).clicked() {
                 open_keyboard_settings();
             }
+            // The link opens the shortcut list itself, but lands on whichever
+            // category was open last — so the one step left is naming ours.
+            ui.label(
+                egui::RichText::new(t("then choose Screenshots"))
+                    .weak()
+                    .small(),
+            );
         });
     }
 }
@@ -315,10 +322,14 @@ fn key_name(key: egui::Key) -> Option<&'static str> {
     })
 }
 
+/// The `?Shortcuts` anchor is load-bearing: without it this stops at the
+/// Keyboard pane and the user has to find the button themselves. With it,
+/// System Settings opens the shortcut list outright — measured, because the
+/// bare identifier looks like the obvious one and does less.
 #[cfg(target_os = "macos")]
 fn open_keyboard_settings() {
     let _ = std::process::Command::new("open")
-        .arg("x-apple.systempreferences:com.apple.Keyboard-Settings.extension")
+        .arg("x-apple.systempreferences:com.apple.Keyboard-Settings.extension?Shortcuts")
         .spawn();
 }
 
