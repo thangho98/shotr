@@ -181,6 +181,9 @@ pub struct ShotrApp {
     pub(crate) shot_full: RgbaImage,
     pub(crate) shot_preview: RgbaImage,
     pub(crate) preview_scale: f32,
+    /// Width `shot_preview` was built to, in device pixels. Follows the
+    /// display — see [`ShotrApp::fit_preview_to_display`].
+    pub(crate) preview_budget: u32,
     pub(crate) texture: Option<egui::TextureHandle>,
     pub(crate) dirty: bool,
 
@@ -322,6 +325,7 @@ impl ShotrApp {
             shot_full: placeholder.clone(),
             shot_preview: placeholder.clone(),
             preview_scale: 1.0,
+            preview_budget: PREVIEW_MAX_W,
             texture: None,
             dirty: true,
             mode: Mode::Select,
@@ -556,7 +560,7 @@ impl ShotrApp {
 
     fn enter_edit(&mut self) {
         self.pan = egui::Vec2::ZERO;
-        let (pv, sc) = make_preview(&self.shot_full, PREVIEW_MAX_W);
+        let (pv, sc) = make_preview(&self.shot_full, self.preview_budget);
         self.shot_preview = pv;
         self.preview_scale = sc;
         self.dirty = true;
@@ -776,6 +780,28 @@ impl ShotrApp {
         }
     }
 
+    /// Keep the preview bitmap sized in the display's *own* pixels.
+    ///
+    /// [`PREVIEW_MAX_W`] is a texel budget, and egui lays out in points: at two
+    /// device pixels per point the canvas asks for twice as many texels as the
+    /// budget allows, and the GPU magnifies the shortfall back up. The exported
+    /// file was pixel-perfect the whole time — only what the editor showed went
+    /// soft, which is why this reads as a rendering bug and is not one.
+    ///
+    /// Recomputed every frame rather than once, because dragging the window to
+    /// a display with a different scale changes the answer.
+    fn fit_preview_to_display(&mut self, ctx: &egui::Context) {
+        let want = ((PREVIEW_MAX_W as f32 * ctx.pixels_per_point()).round() as u32).max(1);
+        if want == self.preview_budget {
+            return;
+        }
+        self.preview_budget = want;
+        let (pv, sc) = make_preview(&self.shot_full, want);
+        self.shot_preview = pv;
+        self.preview_scale = sc;
+        self.dirty = true;
+    }
+
     fn rebuild_texture(&mut self, ctx: &egui::Context) {
         let layers = self.all_layers();
         let rendered =
@@ -967,9 +993,12 @@ impl eframe::App for ShotrApp {
             self.rebuild_swatches(&ctx);
             self.swatches_dirty = false;
         }
-        if self.mode == Mode::Edit && self.dirty {
-            self.rebuild_texture(&ctx);
-            self.dirty = false;
+        if self.mode == Mode::Edit {
+            self.fit_preview_to_display(&ctx);
+            if self.dirty {
+                self.rebuild_texture(&ctx);
+                self.dirty = false;
+            }
         }
 
         egui::CentralPanel::default()

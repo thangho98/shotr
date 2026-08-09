@@ -298,6 +298,16 @@ system costs a failed `read` and nothing more.
 is zero and the wheel arrives as `zoom_delta()`. `zoom_with_keyboard` is turned
 off in `theme::apply` so egui does not rescale the whole UI on ctrl+plus.
 
+**`PREVIEW_MAX_W` is a texel budget, and egui lays out in points.** A fixed 1000
+is one texel per point, which is right only at 1×. On a Retina Mac the canvas
+asks for roughly twice that many device pixels, the GPU magnifies the shortfall,
+and the editor goes visibly soft while the exported file stays pixel-perfect —
+reported as "the image is blurry", which sends you looking at `render/` where
+nothing is wrong. `fit_preview_to_display` multiplies the budget by
+`pixels_per_point` and re-runs every frame, because dragging the window to a
+display with another scale changes the answer. The cost is bounded: the whole
+pipeline renders 8.6Mpx in ~100ms, so a 4× larger preview is still cheap.
+
 **A keyboard shortcut needs the modifiers off the *event*, never off
 `InputState::modifiers`.** That field is the state left at the *end* of the
 frame, and a quick tap delivers the press and the release together — by the time
