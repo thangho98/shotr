@@ -7,6 +7,7 @@ pub mod history;
 pub mod i18n;
 pub mod ipc;
 pub mod ocr;
+pub mod prefs_ui;
 pub mod render;
 pub mod settings;
 pub mod tray;

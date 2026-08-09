@@ -15,7 +15,7 @@ use crate::export;
 use crate::ocr::detect::Secret;
 use crate::render::background::{BG_PRESETS, auto_preset, image_cover, linear, mesh};
 use crate::settings::{
-    Background, CustomKind, ExportFormat, RATIO_PRESETS, Ratio, RedactStyle, Rgba8, Settings,
+    Background, CustomKind, ExportFormat, RATIO_PRESETS, Ratio, RedactStyle, Rgba8, Style,
 };
 use crate::wallpaper;
 
@@ -31,21 +31,6 @@ impl ShotrApp {
                 }
             });
         });
-        ui.horizontal(|ui| {
-            ui.add_space(2.0);
-            ui.label(egui::RichText::new(t("Language")).weak().small());
-            for lang in crate::i18n::Lang::ALL {
-                let on = self.settings.lang == lang;
-                if ui
-                    .selectable_label(on, lang.code())
-                    .on_hover_text(lang.label())
-                    .clicked()
-                {
-                    self.settings.lang = lang;
-                    crate::i18n::set(lang);
-                }
-            }
-        });
         theme::rule(ui);
 
         egui::ScrollArea::vertical()
@@ -58,7 +43,32 @@ impl ShotrApp {
 
     // ----------------------------------------------------------------- select
 
+    /// The two ways into an image that is not a fresh capture.
+    fn open_buttons(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            if ui.button(t("Open file…")).clicked()
+                && let Some(p) = export::open_image_dialog()
+            {
+                self.open_image(&p);
+            }
+            if ui.button(t("From clipboard")).clicked() {
+                self.open_from_clipboard();
+            }
+        });
+    }
+
     fn select_sidebar(&mut self, ui: &mut egui::Ui) {
+        // Opened from the tray as a hub, there is no shot to pick a region out
+        // of — offering the crop controls over an empty placeholder invites a
+        // click that cannot do anything.
+        if self.hub {
+            ui.strong(t("Open a shot"));
+            ui.add_space(6.0);
+            self.open_buttons(ui);
+            self.history_strip(ui);
+            return;
+        }
+
         ui.strong(t("Step 1 — pick a region"));
 
         ui.add_space(4.0);
@@ -119,16 +129,7 @@ impl ShotrApp {
         }
 
         ui.add_space(6.0);
-        ui.horizontal(|ui| {
-            if ui.button(t("Open file…")).clicked()
-                && let Some(p) = export::open_image_dialog()
-            {
-                self.open_image(&p);
-            }
-            if ui.button(t("From clipboard")).clicked() {
-                self.open_from_clipboard();
-            }
-        });
+        self.open_buttons(ui);
 
         self.history_strip(ui);
     }
@@ -188,8 +189,9 @@ impl ShotrApp {
     // ------------------------------------------------------------------- edit
 
     fn edit_sidebar(&mut self, ui: &mut egui::Ui) {
-        // The only way back to the windowed Select screen, and that screen is
-        // the only place History, "Open file…" and "From clipboard" live.
+        // Back to the windowed Select screen. On Linux and Windows that is the
+        // picker over the shot just taken; the tray carries History, "Open
+        // file…" and "From clipboard" on every platform now.
         if ui.button(t("Back to selection")).clicked() {
             self.mode = Mode::Select;
             self.sel_start = None;
@@ -206,7 +208,7 @@ impl ShotrApp {
         theme::rule(ui);
 
         theme::card(ui, t("Layout"), |ui| {
-        let s = &mut self.settings;
+        let s = &mut self.style;
         theme::slider_label(ui, "Padding", s.padding);
         ui.add(egui::Slider::new(&mut s.padding, 0..=400).show_value(false));
 
@@ -223,7 +225,7 @@ impl ShotrApp {
                 };
             }
         });
-        let s = &mut self.settings;
+        let s = &mut self.style;
         ui.horizontal(|ui| {
             ui.add(egui::Slider::new(&mut s.inset, 0..=80).show_value(true));
             // The swatch shows what is actually being drawn, and touching it is
@@ -255,27 +257,27 @@ impl ShotrApp {
 
         theme::card(ui, t("Ratio / Size"), |ui| {
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let is_custom = self.settings.ratio
-                == Ratio::Size(self.settings.custom_size.0, self.settings.custom_size.1);
+            let is_custom = self.style.ratio
+                == Ratio::Size(self.style.custom_size.0, self.style.custom_size.1);
             if ui.selectable_label(is_custom, "Custom…").clicked() {
                 self.show_custom_size = !self.show_custom_size;
                 if self.show_custom_size {
-                    let (w, h) = self.settings.custom_size;
-                    self.settings.ratio = Ratio::Size(w, h);
+                    let (w, h) = self.style.custom_size;
+                    self.style.ratio = Ratio::Size(w, h);
                 }
             }
         });
         self.ratio_chips(ui);
         if self.show_custom_size {
             ui.horizontal(|ui| {
-                let (mut w, mut h) = self.settings.custom_size;
+                let (mut w, mut h) = self.style.custom_size;
                 ui.label("W");
                 let a = ui.add(egui::DragValue::new(&mut w).range(64..=8000).speed(4));
                 ui.label("H");
                 let b = ui.add(egui::DragValue::new(&mut h).range(64..=8000).speed(4));
                 if a.changed() || b.changed() {
-                    self.settings.custom_size = (w, h);
-                    self.settings.ratio = Ratio::Size(w, h);
+                    self.style.custom_size = (w, h);
+                    self.style.ratio = Ratio::Size(w, h);
                 }
             });
         }
@@ -289,7 +291,7 @@ impl ShotrApp {
         ui.add_space(10.0);
 
         if ui.button(t("Reset to defaults")).clicked() {
-            self.settings = Settings::default();
+            self.style = Style::default();
         }
         ui.add_space(10.0);
     }
@@ -301,24 +303,24 @@ impl ShotrApp {
     /// wordmark or a logo, anchored on a nine-square grid or tiled across the
     /// whole picture, with size, angle and opacity on their own dials.
     fn watermark_section(&mut self, ui: &mut egui::Ui) {
-        ui.checkbox(&mut self.settings.watermark, t("Enable watermark"));
-        if !self.settings.watermark {
+        ui.checkbox(&mut self.style.watermark, t("Enable watermark"));
+        if !self.style.watermark {
             return;
         }
 
         // --- what to stamp -------------------------------------------------
-        let has_logo = self.settings.watermark_image.is_some();
+        let has_logo = self.style.watermark_image.is_some();
         ui.horizontal(|ui| {
             if ui.selectable_label(!has_logo, t("Text")).clicked() {
-                self.settings.watermark_image = None;
+                self.style.watermark_image = None;
             }
             if ui.selectable_label(has_logo, t("Logo image")).clicked() && !has_logo
                 && let Some(p) = export::open_image_dialog() {
-                    self.settings.watermark_image = Some(p);
+                    self.style.watermark_image = Some(p);
                 }
         });
 
-        match self.settings.watermark_image.clone() {
+        match self.style.watermark_image.clone() {
             Some(path) => {
                 let name = path
                     .file_name()
@@ -329,48 +331,48 @@ impl ShotrApp {
                     if ui.small_button(t("Change…")).clicked()
                         && let Some(p) = export::open_image_dialog()
                     {
-                        self.settings.watermark_image = Some(p);
+                        self.style.watermark_image = Some(p);
                     }
                 });
             }
             None => {
                 ui.horizontal(|ui| {
                     ui.add(
-                        egui::TextEdit::singleline(&mut self.settings.watermark_text)
+                        egui::TextEdit::singleline(&mut self.style.watermark_text)
                             .hint_text("Enter text")
                             .desired_width(ui.available_width() - 34.0),
                     );
                     if ui.small_button("©").on_hover_text("Chèn ký hiệu bản quyền").clicked() {
-                        self.settings.watermark_text.insert(0, '©');
-                        self.settings.watermark_text.insert(1, ' ');
+                        self.style.watermark_text.insert(0, '©');
+                        self.style.watermark_text.insert(1, ' ');
                     }
                 });
 
                 ui.horizontal_wrapped(|ui| {
                     for style in crate::settings::WatermarkStyle::ALL {
-                        ui.selectable_value(&mut self.settings.watermark_style, style, style.label());
+                        ui.selectable_value(&mut self.style.watermark_style, style, style.label());
                     }
                 });
                 ui.horizontal(|ui| {
                     ui.label(t("Text colour"));
-                    color_button(ui, &mut self.settings.watermark_color);
+                    color_button(ui, &mut self.style.watermark_color);
                 });
             }
         }
 
         // --- where to put it -----------------------------------------------
         ui.add_space(4.0);
-        ui.checkbox(&mut self.settings.watermark_tiled, t("Tile across the image"))
+        ui.checkbox(&mut self.style.watermark_tiled, t("Tile across the image"))
             .on_hover_text("Repeat diagonally across the image — the anti-reuse look");
 
-        if !self.settings.watermark_tiled {
+        if !self.style.watermark_tiled {
             ui.label(egui::RichText::new(t("Position")).weak().small());
             // The nine-square grid, laid out as it reads.
             egui::Grid::new("wm-pos").spacing([4.0, 4.0]).show(ui, |ui| {
                 for (i, pos) in crate::settings::WatermarkPos::ALL.into_iter().enumerate() {
-                    let on = self.settings.watermark_pos == pos;
+                    let on = self.style.watermark_pos == pos;
                     if ui.add(egui::Button::new(if on { "●" } else { "○" }).min_size(egui::vec2(28.0, 22.0)).selected(on)).clicked() {
-                        self.settings.watermark_pos = pos;
+                        self.style.watermark_pos = pos;
                     }
                     if (i + 1) % 3 == 0 {
                         ui.end_row();
@@ -380,19 +382,19 @@ impl ShotrApp {
         }
 
         // --- how it looks ---------------------------------------------------
-        theme::slider_label(ui, t("Size"), format!("{:.0}%", self.settings.watermark_size * 100.0));
-        ui.add(egui::Slider::new(&mut self.settings.watermark_size, 0.4..=4.0).show_value(false));
+        theme::slider_label(ui, t("Size"), format!("{:.0}%", self.style.watermark_size * 100.0));
+        ui.add(egui::Slider::new(&mut self.style.watermark_size, 0.4..=4.0).show_value(false));
 
-        let pct = (self.settings.watermark_opacity as f32 / 255.0 * 100.0).round() as u8;
+        let pct = (self.style.watermark_opacity as f32 / 255.0 * 100.0).round() as u8;
         theme::slider_label(ui, t("Opacity"), format!("{pct}%"));
         let mut p = pct;
         if ui.add(egui::Slider::new(&mut p, 5..=100).show_value(false)).changed() {
-            self.settings.watermark_opacity = (p as f32 / 100.0 * 255.0).round() as u8;
+            self.style.watermark_opacity = (p as f32 / 100.0 * 255.0).round() as u8;
         }
 
-        theme::slider_label(ui, t("Angle"), format!("{:.0}°", self.settings.watermark_angle));
-        ui.add(egui::Slider::new(&mut self.settings.watermark_angle, -90.0..=90.0).show_value(false));
-        if self.settings.watermark_tiled {
+        theme::slider_label(ui, t("Angle"), format!("{:.0}°", self.style.watermark_angle));
+        ui.add(egui::Slider::new(&mut self.style.watermark_angle, -90.0..=90.0).show_value(false));
+        if self.style.watermark_tiled {
             ui.label(
                 egui::RichText::new(t("Protective tiling is usually 20–40% opacity at -30°."))
                     .weak()
@@ -534,7 +536,7 @@ impl ShotrApp {
             let selected = self
                 .presets
                 .iter()
-                .position(|p| p.settings == self.settings)
+                .position(|p| p.style == self.style)
                 .map(|i| self.presets[i].name.clone())
                 .unwrap_or_else(|| "—".to_string());
 
@@ -552,7 +554,7 @@ impl ShotrApp {
                     }
                 });
 
-            let has_match = self.presets.iter().any(|p| p.settings == self.settings);
+            let has_match = self.presets.iter().any(|p| p.style == self.style);
             if ui
                 .add_enabled(has_match, egui::Button::new("🗑"))
                 .on_hover_text("Xoá preset đang khớp")
@@ -560,7 +562,7 @@ impl ShotrApp {
                 && let Some(i) = self
                     .presets
                     .iter()
-                    .position(|p| p.settings == self.settings)
+                    .position(|p| p.style == self.style)
             {
                 delete = Some(i);
             }
@@ -578,7 +580,7 @@ impl ShotrApp {
         });
 
         if let Some(i) = apply {
-            self.settings = self.presets[i].settings.clone();
+            self.style = self.presets[i].style.clone();
             self.preset_name = self.presets[i].name.clone();
         }
         if let Some(i) = delete {
@@ -605,7 +607,7 @@ impl ShotrApp {
             .spacing([GAP, GAP])
             .show(ui, |ui| {
                 for (i, (sw, tex)) in swatches.iter().enumerate() {
-                    let selected = self.settings.background == sw.background();
+                    let selected = self.style.background == sw.background();
                     let img = egui::Image::new(egui::load::SizedTexture::new(
                         tex.id(),
                         egui::vec2(side, side),
@@ -625,20 +627,20 @@ impl ShotrApp {
         self.swatches = swatches;
 
         if let Some(sw) = picked {
-            self.settings.background = sw.background();
+            self.style.background = sw.background();
             // Custom-with-image but nothing chosen yet would render as a flat
             // colour; the gradient is a friendlier landing spot.
             if sw == Swatch::Custom
-                && self.settings.custom_bg.kind == CustomKind::Image
-                && self.settings.custom_bg.image.is_none()
+                && self.style.custom_bg.kind == CustomKind::Image
+                && self.style.custom_bg.image.is_none()
             {
-                self.settings.custom_bg.kind = CustomKind::Linear;
+                self.style.custom_bg.kind = CustomKind::Linear;
             }
         }
 
-        if self.settings.background == Background::Custom {
+        if self.style.background == Background::Custom {
             ui.add_space(4.0);
-            let c = &mut self.settings.custom_bg;
+            let c = &mut self.style.custom_bg;
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut c.kind, CustomKind::Solid, t("Solid colour"));
                 ui.selectable_value(&mut c.kind, CustomKind::Linear, "Gradient");
@@ -680,7 +682,7 @@ impl ShotrApp {
     fn ratio_chips(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
             for preset in RATIO_PRESETS {
-                let selected = self.settings.ratio == preset.ratio;
+                let selected = self.style.ratio == preset.ratio;
                 let hint = match preset.ratio {
                     Ratio::Size(w, h) => format!("{w} × {h}"),
                     _ => preset.name.to_string(),
@@ -690,7 +692,7 @@ impl ShotrApp {
                     .on_hover_text(hint)
                     .clicked()
                 {
-                    self.settings.ratio = preset.ratio;
+                    self.style.ratio = preset.ratio;
                 }
             }
         });
@@ -698,7 +700,7 @@ impl ShotrApp {
 
     fn export_section(&mut self, ui: &mut egui::Ui) {
         ui.label("Xuất file");
-        let s = &mut self.settings;
+        let s = &mut self.prefs;
         ui.horizontal(|ui| {
             for f in ExportFormat::ALL {
                 ui.selectable_value(&mut s.format, f, f.label());
@@ -818,11 +820,11 @@ impl ShotrApp {
 
         let found = self.active_finding_count();
         ui.checkbox(
-            &mut self.settings.redact,
+            &mut self.prefs.redact,
             tf("Redact sensitive data ({found} found)", &[("found", &found.to_string())]),
         );
 
-        if self.settings.redact {
+        if self.prefs.redact {
             let counts = [
                 self.count_of(Secret::Email),
                 self.count_of(Secret::CreditCard),
@@ -831,7 +833,7 @@ impl ShotrApp {
                 self.count_of(Secret::Phone),
             ];
             ui.indent("redact-kinds", |ui| {
-                let s = &mut self.settings;
+                let s = &mut self.prefs;
                 for (flag, kind, n) in [
                     (&mut s.redact_email, Secret::Email, counts[0]),
                     (&mut s.redact_card, Secret::CreditCard, counts[1]),
@@ -845,22 +847,22 @@ impl ShotrApp {
 
             ui.horizontal(|ui| {
                 ui.selectable_value(
-                    &mut self.settings.redact_style,
+                    &mut self.style.redact_style,
                     RedactStyle::Solid,
                     t("Solid"),
                 );
-                ui.selectable_value(&mut self.settings.redact_style, RedactStyle::Blur, t("Blur"));
+                ui.selectable_value(&mut self.style.redact_style, RedactStyle::Blur, t("Blur"));
             });
-            match self.settings.redact_style {
+            match self.style.redact_style {
                 RedactStyle::Solid => {
                     ui.horizontal(|ui| {
                         ui.label(t("Redaction colour"));
-                        color_button(ui, &mut self.settings.redact_color);
+                        color_button(ui, &mut self.style.redact_color);
                     });
                 }
                 RedactStyle::Blur => {
                     ui.add(
-                        egui::Slider::new(&mut self.settings.redact_blur, 2.0..=60.0).text("Blur amount"),
+                        egui::Slider::new(&mut self.style.redact_blur, 2.0..=60.0).text("Blur amount"),
                     );
                 }
             }
@@ -931,7 +933,7 @@ impl ShotrApp {
                     },
                 },
                 Swatch::Custom => {
-                    let c = &self.settings.custom_bg;
+                    let c = &self.style.custom_bg;
                     match c.kind {
                         CustomKind::Solid => {
                             RgbaImage::from_pixel(SWATCH_PX, SWATCH_PX, Rgba(c.color_a))
@@ -962,7 +964,7 @@ impl ShotrApp {
                     self.do_save(None);
                 }
                 if ui.button("Save As…").clicked()
-                    && let Some(p) = export::save_as_dialog(&self.settings)
+                    && let Some(p) = export::save_as_dialog(&self.prefs)
                 {
                     self.do_save(Some(p));
                 }
@@ -1004,7 +1006,7 @@ impl ShotrApp {
                         }
                         ui.separator();
                         if ui.button(t("Reset to defaults")).clicked() {
-                            self.settings = Settings::default();
+                            self.style = Style::default();
                             ui.close();
                         }
                         ui.separator();

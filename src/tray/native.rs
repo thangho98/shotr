@@ -148,6 +148,12 @@ impl<F: FnMut(Option<Command>) -> bool> ApplicationHandler for Daemon<F> {
         // click landed in the same batch, which is the pointer-slam case — that
         // menu is already open too. `Move` is ignored outright, because it
         // repeats for as long as the pointer rests on the icon.
+        //
+        // Every entry in the macOS menu is static — its window entry hands the
+        // choice to Apple's overlay instead of naming windows — so the rebuild
+        // there changes nothing. It still runs: one path that is correct
+        // everywhere beats a `cfg` that has to be re-reasoned about, and the
+        // rebuild is two cheap system calls.
         let mut approaching = false;
         let mut opened = false;
         while let Ok(event) = TrayIconEvent::receiver().try_recv() {
@@ -199,6 +205,12 @@ fn menu() -> Result<(Menu, HashMap<MenuId, Command>), Box<dyn std::error::Error>
     actions.insert(region.id().clone(), Command::CaptureRegion);
     let open = MenuItem::new(t("Open image…"), true, None);
     actions.insert(open.id().clone(), Command::OpenFile);
+    let history = MenuItem::new(t("Recent shots…"), true, None);
+    actions.insert(history.id().clone(), Command::History);
+    let clipboard = MenuItem::new(t("From clipboard"), true, None);
+    actions.insert(clipboard.id().clone(), Command::FromClipboard);
+    let prefs = MenuItem::new(t("Preferences…"), true, None);
+    actions.insert(prefs.id().clone(), Command::Preferences);
     let quit = MenuItem::new(t("Quit"), true, None);
     actions.insert(quit.id().clone(), Command::Quit);
 
@@ -216,25 +228,43 @@ fn menu() -> Result<(Menu, HashMap<MenuId, Command>), Box<dyn std::error::Error>
         }
     }
 
-    let windows = Submenu::new(t("Capture a window"), true);
-    let listed = crate::winlist::list();
-    if listed.is_empty() {
-        windows.append(&MenuItem::new(t("(no windows could be read)"), false, None))?;
-    } else {
-        for window in listed {
-            let item = MenuItem::new(window.label(), true, None);
-            actions.insert(item.id().clone(), Command::CaptureWindow(window.identifier));
-            windows.append(&item)?;
+    // macOS names no windows: `screencapture -i -W` shows the list itself,
+    // highlights what will be captured, and hands back what was clicked. A menu
+    // of windows here would ask the same question twice — and it is what forced
+    // the menu to be rebuilt, since a list built at startup goes stale in
+    // seconds.
+    #[cfg(target_os = "macos")]
+    let window_entry = {
+        let item = MenuItem::new(t("Capture a window…"), true, None);
+        actions.insert(item.id().clone(), Command::CaptureWindow(String::new()));
+        item
+    };
+    #[cfg(not(target_os = "macos"))]
+    let window_entry = {
+        let windows = Submenu::new(t("Capture a window"), true);
+        let listed = crate::winlist::list();
+        if listed.is_empty() {
+            windows.append(&MenuItem::new(t("(no windows could be read)"), false, None))?;
+        } else {
+            for window in listed {
+                let item = MenuItem::new(window.label(), true, None);
+                actions.insert(item.id().clone(), Command::CaptureWindow(window.identifier));
+                windows.append(&item)?;
+            }
         }
-    }
+        windows
+    };
 
     menu.append_items(&[
         &region,
         &screens,
-        &windows,
+        &window_entry,
         &PredefinedMenuItem::separator(),
         &open,
+        &history,
+        &clipboard,
         &PredefinedMenuItem::separator(),
+        &prefs,
         &quit,
     ])?;
     Ok((menu, actions))

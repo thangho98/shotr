@@ -10,7 +10,7 @@ use image::{Rgba, RgbaImage};
 
 use super::frame::{blend, rounded_coverage};
 use super::text;
-use crate::settings::{Settings, WatermarkPos, WatermarkStyle};
+use crate::settings::{Style, WatermarkPos, WatermarkStyle};
 
 /// Draw the watermark onto `canvas`.
 ///
@@ -18,7 +18,7 @@ use crate::settings::{Settings, WatermarkPos, WatermarkStyle};
 /// wordmark are alternatives, not layers.
 pub fn draw(
     canvas: &mut RgbaImage,
-    settings: &Settings,
+    settings: &Style,
     font: Option<&FontArc>,
     logo: Option<&RgbaImage>,
 ) {
@@ -45,7 +45,7 @@ pub fn draw(
 /// The mark itself, on transparent pixels. `None` when there is nothing to say.
 fn build_stamp(
     canvas_w: u32,
-    s: &Settings,
+    s: &Style,
     font: Option<&FontArc>,
     logo: Option<&RgbaImage>,
 ) -> Option<RgbaImage> {
@@ -73,7 +73,7 @@ fn build_stamp(
 }
 
 /// Render the wordmark, including whatever backing its style calls for.
-fn text_stamp(font: &FontArc, px: f32, label: &str, s: &Settings) -> RgbaImage {
+fn text_stamp(font: &FontArc, px: f32, label: &str, s: &Style) -> RgbaImage {
     let w = text::measure(font, px, label);
     let pad = match s.watermark_style {
         WatermarkStyle::Pill => px * 0.6,
@@ -119,7 +119,7 @@ fn text_stamp(font: &FontArc, px: f32, label: &str, s: &Settings) -> RgbaImage {
 }
 
 /// Top-left corner for the stamp, given the chosen anchor.
-fn place(cw: u32, ch: u32, stamp: &RgbaImage, s: &Settings) -> (i64, i64) {
+fn place(cw: u32, ch: u32, stamp: &RgbaImage, s: &Style) -> (i64, i64) {
     let margin = (cw.min(ch) as f32 * 0.02).max(8.0) as i64;
     let (cw, ch) = (cw as i64, ch as i64);
     let (sw, sh) = (stamp.width() as i64, stamp.height() as i64);
@@ -222,8 +222,8 @@ mod tests {
     use super::*;
     use crate::settings::Rgba8;
 
-    fn settings() -> Settings {
-        Settings {
+    fn settings() -> Style {
+        Style {
             watermark: true,
             watermark_text: "shotr".into(),
             ..Default::default()
@@ -243,7 +243,7 @@ mod tests {
     #[test]
     fn an_empty_watermark_leaves_the_image_untouched() {
         let mut img = opaque(200, 120);
-        let s = Settings {
+        let s = Style {
             watermark: true,
             watermark_text: "   ".into(),
             ..Default::default()
@@ -252,7 +252,7 @@ mod tests {
         assert_eq!(marked_pixels(&img), 0);
         // And with the whole feature off.
         let mut img = opaque(200, 120);
-        draw(&mut img, &Settings::default(), None, None);
+        draw(&mut img, &Style::default(), None, None);
         assert_eq!(marked_pixels(&img), 0);
     }
 
@@ -269,7 +269,7 @@ mod tests {
         ];
         for (pos, want_left, want_top) in cases {
             let mut img = opaque(400, 300);
-            let s = Settings {
+            let s = Style {
                 watermark_pos: pos,
                 ..settings()
             };
@@ -296,7 +296,7 @@ mod tests {
     fn centre_really_is_the_centre() {
         let logo = RgbaImage::from_pixel(20, 10, Rgba([255, 0, 0, 255]));
         let mut img = opaque(400, 300);
-        let s = Settings {
+        let s = Style {
             watermark_pos: WatermarkPos::Center,
             ..settings()
         };
@@ -310,7 +310,7 @@ mod tests {
         let logo = RgbaImage::from_pixel(40, 40, Rgba([255, 255, 255, 255]));
         let sample = |op: u8| {
             let mut img = opaque(200, 200);
-            let s = Settings {
+            let s = Style {
                 watermark_pos: WatermarkPos::Center,
                 watermark_opacity: op,
                 ..settings()
@@ -329,7 +329,7 @@ mod tests {
     fn tiling_covers_the_whole_image() {
         let logo = RgbaImage::from_pixel(16, 8, Rgba([255, 0, 0, 255]));
         let mut img = opaque(300, 200);
-        let s = Settings {
+        let s = Style {
             watermark_tiled: true,
             watermark_angle: -30.0,
             ..settings()
@@ -403,7 +403,7 @@ mod tests {
     fn a_logo_replaces_the_text_rather_than_stacking_with_it() {
         let logo = RgbaImage::from_pixel(30, 30, Rgba([0, 255, 0, 255]));
         let mut img = opaque(200, 200);
-        let s = Settings {
+        let s = Style {
             watermark_pos: WatermarkPos::Center,
             watermark_opacity: 255,
             ..settings()

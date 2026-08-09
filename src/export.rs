@@ -15,7 +15,7 @@ use std::io::BufWriter;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::settings::{ExportFormat, Settings, pictures_dir};
+use crate::settings::{ExportFormat, Prefs, pictures_dir};
 
 fn timestamp() -> u64 {
     SystemTime::now()
@@ -69,15 +69,16 @@ fn civil_from_unix(unix: u64) -> (String, String) {
     )
 }
 
-/// `~/Pictures/shotr/<template>.<ext>`
-pub fn default_path(settings: &Settings) -> PathBuf {
-    let name = expand_template(&settings.filename_template, timestamp());
-    pictures_dir()
+/// `<save dir>/shotr/<template>.<ext>`
+pub fn default_path(prefs: &Prefs) -> PathBuf {
+    let name = expand_template(&prefs.filename_template, timestamp());
+    prefs
+        .save_dir()
         .join("shotr")
-        .join(format!("{name}.{}", settings.format.extension()))
+        .join(format!("{name}.{}", prefs.format.extension()))
 }
 
-pub fn save(img: &RgbaImage, path: &Path, settings: &Settings) -> Result<(), String> {
+pub fn save(img: &RgbaImage, path: &Path, prefs: &Prefs) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
@@ -87,11 +88,11 @@ pub fn save(img: &RgbaImage, path: &Path, settings: &Settings) -> Result<(), Str
     // Pick the format from the extension the user actually chose in Save As,
     // falling back to the configured one.
     let format = ExportFormat::from_extension(path.extension().and_then(|e| e.to_str()))
-        .unwrap_or(settings.format);
+        .unwrap_or(prefs.format);
 
     match format {
         ExportFormat::Png => {
-            let compression = if settings.png_max_compression {
+            let compression = if prefs.png_max_compression {
                 CompressionType::Best
             } else {
                 CompressionType::Default
@@ -109,7 +110,7 @@ pub fn save(img: &RgbaImage, path: &Path, settings: &Settings) -> Result<(), Str
             // JPEG has no alpha channel; flatten first so transparent corners
             // come out white instead of black.
             let flat = flatten_on_white(img);
-            JpegEncoder::new_with_quality(writer, settings.jpeg_quality.clamp(1, 100))
+            JpegEncoder::new_with_quality(writer, prefs.jpeg_quality.clamp(1, 100))
                 .write_image(
                     flat.as_raw(),
                     flat.width(),
@@ -149,11 +150,11 @@ pub fn flatten_on_white(img: &RgbaImage) -> RgbImage {
 }
 
 /// Ask the user where to put the file. Returns `None` if they cancelled.
-pub fn save_as_dialog(settings: &Settings) -> Option<PathBuf> {
-    let name = expand_template(&settings.filename_template, timestamp());
+pub fn save_as_dialog(prefs: &Prefs) -> Option<PathBuf> {
+    let name = expand_template(&prefs.filename_template, timestamp());
     rfd::FileDialog::new()
-        .set_file_name(format!("{name}.{}", settings.format.extension()))
-        .set_directory(pictures_dir())
+        .set_file_name(format!("{name}.{}", prefs.format.extension()))
+        .set_directory(prefs.save_dir())
         .add_filter("PNG", &["png"])
         .add_filter("JPEG", &["jpg", "jpeg"])
         .add_filter("WebP", &["webp"])
@@ -251,12 +252,12 @@ mod tests {
         let img = RgbaImage::from_pixel(24, 16, image::Rgba([200, 60, 90, 255]));
 
         for format in [ExportFormat::Png, ExportFormat::Jpeg, ExportFormat::Webp] {
-            let settings = Settings {
+            let prefs = Prefs {
                 format,
                 ..Default::default()
             };
             let path = dir.join(format!("t.{}", format.extension()));
-            save(&img, &path, &settings).expect("save");
+            save(&img, &path, &prefs).expect("save");
             let back = image::open(&path).expect("reopen").to_rgba8();
             assert_eq!(
                 (back.width(), back.height()),
@@ -273,13 +274,13 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let img = RgbaImage::from_pixel(8, 8, image::Rgba([1, 2, 3, 255]));
 
-        // Settings say PNG, but the user typed a .jpg name in Save As.
-        let settings = Settings {
+        // Preferences say PNG, but the user typed a .jpg name in Save As.
+        let prefs = Prefs {
             format: ExportFormat::Png,
             ..Default::default()
         };
         let path = dir.join("forced.jpg");
-        save(&img, &path, &settings).unwrap();
+        save(&img, &path, &prefs).unwrap();
 
         let format = image::ImageReader::open(&path)
             .unwrap()

@@ -27,25 +27,37 @@ pub fn run() -> i32 {
         ipc::Instance::Primary(rx) => rx,
     };
 
+    // Preferences is the one window a second copy of makes no sense for: two of
+    // them would write the same file and disagree. Captures are the opposite —
+    // asking for two shots means two shots — so only this one is tracked.
+    let mut prefs_window: Option<std::process::Child> = None;
+
     // Two sources, one loop: the tray menu, and later `shotr` launches. Which
     // loop it is differs by platform — see `tray::run`.
-    tray::run(|command| {
+    tray::run(move |command| {
         match command {
-            Some(Command::CaptureRegion) => spawn_shot(&["--capture"]),
-            Some(Command::CaptureFull) => spawn_shot(&["--capture", "--full"]),
-            Some(Command::CaptureMonitor(i)) => {
-                spawn_shot(&["--capture", "--full", "--monitor", &i.to_string()])
+            Some(Command::Quit) => return false,
+            Some(Command::Preferences) => {
+                let open = prefs_window
+                    .as_mut()
+                    .is_some_and(|child| matches!(child.try_wait(), Ok(None)));
+                if !open {
+                    prefs_window = spawn_shot(&Command::Preferences.args());
+                }
             }
-            // The identifier survives the trip because both backends hand out
+            // Every other entry is one fresh process. The identifier inside a
+            // window command survives the trip because every backend hands out
             // one meant to be shared: `ext_foreign_toplevel_list_v1` says so in
             // as many words, and elsewhere it is the window id the system uses.
-            Some(Command::CaptureWindow(id)) => spawn_shot(&["--capture", "--window", &id]),
-            Some(Command::OpenFile) => spawn_shot(&["--open"]),
-            Some(Command::Quit) => return false,
+            Some(command) => {
+                spawn_shot(&command.args());
+            }
             None => {
                 if let Ok(request) = requests.try_recv() {
                     match request {
-                        ipc::Request::Capture | ipc::Request::Show => spawn_shot(&["--capture"]),
+                        ipc::Request::Capture | ipc::Request::Show => {
+                            spawn_shot(&Command::CaptureRegion.args());
+                        }
                     }
                 }
             }
@@ -54,18 +66,22 @@ pub fn run() -> i32 {
     })
 }
 
-/// Launch a capture process. Detached: the daemon must not block on it, and it
-/// outliving or predeceasing us is fine either way.
-fn spawn_shot(args: &[&str]) {
+/// Launch a shotr process. Detached: the daemon must not block on it, and it
+/// outliving or predeceasing us is fine either way. The handle comes back only
+/// so a window that should be unique can be checked for.
+fn spawn_shot(args: &[String]) -> Option<std::process::Child> {
     let exe = match std::env::current_exe() {
         Ok(p) => p,
         Err(e) => {
             eprintln!("Could not resolve the shotr executable: {e}");
-            return;
+            return None;
         }
     };
     match Process::new(exe).args(args).spawn() {
-        Ok(_child) => {}
-        Err(e) => eprintln!("Could not run shotr {}: {e}", args.join(" ")),
+        Ok(child) => Some(child),
+        Err(e) => {
+            eprintln!("Could not run shotr {}: {e}", args.join(" "));
+            None
+        }
     }
 }

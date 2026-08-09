@@ -32,10 +32,17 @@ bash packaging/install-macos.sh   # that .app into /Applications
 
 Install it rather than running it out of `dist/`: the build script clears that
 directory each time, and macOS ties screen-recording permission to where the app
-lives.
+lives. On macOS the `.app` is the only supported route — a bare binary borrows the
+permission of whatever launched it.
 
 Neither artefact is signed, so both systems warn on first launch. On macOS,
 right-click the app and choose Open.
+
+macOS will ask for **Screen Recording** the first time you capture; without it
+nothing is written and the capture looks like it was cancelled. Grant it, then quit
+shotr from the menu bar and start it again — macOS reads that permission once per
+process. If you are building repeatedly, sign the bundle so the grant survives:
+see `packaging/README.md`.
 
 shotr lives in the notification area on Windows and in the menu bar on macOS,
 the same as it does in the Linux tray. It takes no Dock icon on macOS while it
@@ -47,9 +54,11 @@ The tray menu is where you say what to capture:
 
 | | |
 |---|---|
-| **Capture a region…** | freezes the screen, then you drag a rectangle on whichever monitor the pointer is on |
+| **Capture a region…** | drag a rectangle. On macOS this is the system overlay; elsewhere shotr freezes the screen first |
 | **Capture a whole screen ▸** | all screens together, or one of them by name |
-| **Capture a window ▸** | the windows open right now, listed by title |
+| **Capture a window…** | on macOS, click a window in the system overlay. On Linux and Windows, a submenu of open windows by title |
+| **Open image…**, **Recent shots…**, **From clipboard** | work on an image you already have |
+| **Preferences…** | language, where files go, export defaults, redaction, and the macOS permission |
 
 That choice is made once, before anything is grabbed. The editor then works on
 what it was given — it has no source dropdown, by design.
@@ -63,6 +72,9 @@ shotr --capture --full      capture everything, straight to the editor
 shotr --capture --monitor N one monitor, straight to the editor
 shotr --capture --window ID one window, straight to the editor
 shotr --open [FILE]         open an existing image
+shotr --clipboard           open whatever image is on the clipboard
+shotr --history             recent shots, and the other ways in
+shotr --settings            the Preferences window
 ```
 
 Wayland gives no application a global key grab, so the shortcut has to come from
@@ -88,10 +100,10 @@ the process that is up rather than starting a second one — on every platform.
 **Capture** — the whole desktop, a dragged region, or a single window. With
 several monitors it captures once and cuts each screen out of that one snapshot,
 so every view shows the same instant. A window is copied from its own buffer, so
-one sitting **behind another still comes out whole**. On macOS the window is
-brought to the front first: a window parked in Stage Manager is not really on
-screen, and every tool that asks the system for it — Apple's `screencapture`
-included — gets the tilted little preview instead of the window.
+one sitting **behind another still comes out whole**. On macOS the region and
+window pickers are the system's own — the same overlay `Cmd-Shift-4` gives you, so
+it covers the menu bar and the Dock and lets space switch between region and
+window.
 
 **Beautify** — 19 gradient presets, a background generated from the image's own
 colours, the desktop wallpaper, or a colour or image of your own. Padding, an

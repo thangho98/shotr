@@ -7,7 +7,7 @@
 
 use image::{Rgba, RgbaImage};
 
-use crate::settings::{Background, CustomKind, Rgba8, Settings};
+use crate::settings::{Background, CustomKind, Rgba8, Style};
 
 /// A soft colour spot laid over the four-corner blend. Real mesh gradients get
 /// their organic look from overlapping radial spots rather than from a single
@@ -674,7 +674,7 @@ fn hsl_to_rgb(h: f32, s: f32, l: f32) -> [f32; 3] {
 pub fn paint(
     w: u32,
     h: u32,
-    settings: &Settings,
+    settings: &Style,
     bg_image: Option<&RgbaImage>,
     shot: Option<&RgbaImage>,
 ) -> RgbaImage {

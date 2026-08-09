@@ -28,7 +28,19 @@ const TEXT_DIM: Color32 = Color32::from_rgb(0x8b, 0x91, 0xa0);
 // the `_f32` on every literal width here and in `canvas.rs` and `icons.rs` —
 // they are not decoration, and removing them breaks CI before it breaks anyone
 // locally, because CI tracks stable and a working checkout may not.
-pub fn apply(ctx: &egui::Context) {
+
+/// Install the look, and the font that goes with it.
+///
+/// The font is not separable from the theme: egui's bundled one has Latin
+/// Extended-A but not Latin Extended Additional (U+1EA0–U+1EF9), where every
+/// Vietnamese tone mark lives, so "Tiếng Việt" renders as "Ti□ng Vi□t". Any
+/// window that styled itself without also loading a system font would show that
+/// — the Preferences window did, until this moved in here.
+///
+/// The loaded font comes back because the watermark rasteriser needs the same
+/// one; windows that do not draw watermarks ignore the return.
+pub fn apply(ctx: &egui::Context) -> Option<ab_glyph::FontArc> {
+    let font = install_fonts(ctx);
     let mut style = (*ctx.global_style()).clone();
 
     let mut v = egui::Visuals::dark();
@@ -101,6 +113,27 @@ pub fn apply(ctx: &egui::Context) {
     // shotr zooms the picture, not the chrome. Left on, egui's own keyboard zoom
     // would grab ctrl+plus/minus/0 and rescale the whole interface instead.
     ctx.options_mut(|o| o.zoom_with_keyboard = false);
+
+    font
+}
+
+/// Put a Vietnamese-capable system font in front of egui's bundled one.
+fn install_fonts(ctx: &egui::Context) -> Option<ab_glyph::FontArc> {
+    let (data, font) = crate::render::text::load_system_font()?;
+    let mut fonts = egui::FontDefinitions::default();
+    fonts.font_data.insert(
+        "viet".to_owned(),
+        std::sync::Arc::new(egui::FontData::from_owned(data)),
+    );
+    for fam in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+        fonts
+            .families
+            .entry(fam)
+            .or_default()
+            .insert(0, "viet".to_owned());
+    }
+    ctx.set_fonts(fonts);
+    Some(font)
 }
 
 /// Backdrop for the preview area. A shade darker than the sidebar so the

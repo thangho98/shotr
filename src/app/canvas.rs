@@ -11,6 +11,11 @@ use crate::settings::Background;
 
 impl ShotrApp {
     pub(super) fn select_central(&mut self, ui: &mut egui::Ui) {
+        // The hub has no capture behind it — the placeholder texture would only
+        // read as a broken screenshot.
+        if self.hub {
+            return;
+        }
         let Some(raw_tex) = self.raw_texture.clone() else {
             return;
         };
@@ -215,7 +220,7 @@ impl ShotrApp {
         let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
 
         // A checkerboard makes a transparent background read as transparent.
-        if self.settings.background == Background::None {
+        if self.style.background == Background::None {
             paint_checker(ui.painter(), img_rect);
         }
         ui.painter()

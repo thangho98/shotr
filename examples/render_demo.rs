@@ -1,12 +1,12 @@
 //! Headless render harness: exercises the compositing pipeline over a matrix of
-//! settings and writes the results next to the input, plus a timing for a
+//! styles and writes the results next to the input, plus a timing for a
 //! full-resolution export.
 //!
 //!     cargo run --release --example render_demo -- <input.png> <outdir>
 
 use shotr::annotate::{Layer, Tool};
 use shotr::render::{Scene, background::BG_PRESETS, render, text};
-use shotr::settings::{Background, Ratio, Settings};
+use shotr::settings::{Background, Ratio, Style};
 
 fn main() {
     let mut args = std::env::args().skip(1);
@@ -18,25 +18,25 @@ fn main() {
     let font = text::load_system_font().map(|(_, f)| f);
     println!("input: {} ({}x{})", input, shot.width(), shot.height());
 
-    let cases: Vec<(&str, Settings)> = vec![
-        ("01-default", Settings::default()),
+    let cases: Vec<(&str, Style)> = vec![
+        ("01-default", Style::default()),
         (
             "02-preset-love",
-            Settings {
+            Style {
                 background: Background::Preset(4),
                 ..Default::default()
             },
         ),
         (
             "03-preset-rain",
-            Settings {
+            Style {
                 background: Background::Preset(5),
                 ..Default::default()
             },
         ),
         (
             "04-inset",
-            Settings {
+            Style {
                 inset: 14,
                 radius: 28,
                 background: Background::Preset(1),
@@ -45,14 +45,14 @@ fn main() {
         ),
         (
             "05-no-shadow",
-            Settings {
+            Style {
                 shadow: 0,
                 ..Default::default()
             },
         ),
         (
             "06-max-shadow",
-            Settings {
+            Style {
                 shadow: 100,
                 padding: 120,
                 ..Default::default()
@@ -60,14 +60,14 @@ fn main() {
         ),
         (
             "07-transparent",
-            Settings {
+            Style {
                 background: Background::None,
                 ..Default::default()
             },
         ),
         (
             "08-instagram",
-            Settings {
+            Style {
                 ratio: Ratio::Size(1080, 1080),
                 background: Background::Preset(2),
                 ..Default::default()
@@ -75,7 +75,7 @@ fn main() {
         ),
         (
             "09-16x9",
-            Settings {
+            Style {
                 ratio: Ratio::Aspect(16.0 / 9.0),
                 background: Background::Preset(3),
                 ..Default::default()
@@ -83,7 +83,7 @@ fn main() {
         ),
         (
             "10-watermark",
-            Settings {
+            Style {
                 watermark: true,
                 background: Background::Preset(6),
                 ..Default::default()
@@ -91,7 +91,7 @@ fn main() {
         ),
         (
             "11-balance",
-            Settings {
+            Style {
                 balance: true,
                 background: Background::Preset(0),
                 ..Default::default()
@@ -99,7 +99,7 @@ fn main() {
         ),
         (
             "15-aurora",
-            Settings {
+            Style {
                 background: Background::Preset(7),
                 padding: 110,
                 radius: 22,
@@ -109,7 +109,7 @@ fn main() {
         ),
         (
             "16-lagoon",
-            Settings {
+            Style {
                 background: Background::Preset(12),
                 padding: 110,
                 radius: 22,
@@ -119,14 +119,14 @@ fn main() {
         ),
         (
             "14-auto-bg",
-            Settings {
+            Style {
                 background: Background::Auto,
                 ..Default::default()
             },
         ),
         (
             "12-radius0",
-            Settings {
+            Style {
                 radius: 0,
                 inset: 0,
                 background: Background::Preset(5),
@@ -202,7 +202,7 @@ fn main() {
             ),
             label,
         ];
-        let settings = Settings {
+        let settings = Style {
             background: Background::Preset(3),
             ..Default::default()
         };

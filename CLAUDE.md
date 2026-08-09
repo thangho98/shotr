@@ -9,10 +9,12 @@ dependency — a checkout plus a Rust toolchain is the whole setup.
 ## Commands
 
 ```bash
-cargo test                   # 163 tests, all fast; no network, no GPU, no display
+cargo test                   # 175 tests, all fast; no network, no GPU, no display
 cargo clippy --all-targets   # must be zero warnings
 cargo run -- --capture       # region picker
 cargo run -- --open FILE     # straight to the editor
+cargo run -- --settings      # the Preferences window
+cargo run -- --history       # the hub: recent shots, open, paste
 ./install.sh                 # build release, install to ~/.local/bin (Linux)
 ./install.sh --uninstall
 
@@ -41,25 +43,38 @@ give them an icon.
 Keep this directory honest. A probe written to answer one question should be
 deleted once the answer is written down — leaving it behind implies the question
 is still open. `probe.rs` lived here until the xcap findings moved into
-`capture.rs` and this file.
+`capture/` and this file.
 
 ## Layout
 
 ```
 src/
-  main.rs           argument parsing and the one decision: daemon, picker,
-                    one window, or straight to the editor
-  capture.rs        screen capture, multi-monitor stitching        (all platforms)
+  main.rs           argument parsing and the one decision: daemon, Preferences,
+                    picker, one window, the hub, or straight to the editor
+  capture/
+    mod.rs          capture façade, multi-monitor stitching        (all platforms)
+    xcap.rs           └─ xcap monitors                             (Linux/Windows)
+    macos.rs          └─ /usr/sbin/screencapture                   (macOS only)
   winlist.rs        window listing/capture façade                  (all platforms)
   wl_windows.rs       └─ Wayland toplevel protocols                (Linux only)
   tray/
-    mod.rs          tray façade and the command set                (all platforms)
+    mod.rs          tray façade, the command set, and its arguments
     sni.rs            └─ StatusNotifierItem over D-Bus             (Linux only)
     native.rs         └─ tray-icon on a winit loop                 (Win/macOS)
   daemon.rs         tray-only background mode                      (all platforms)
   ipc.rs            single instance: unix socket, or a named pipe  (all platforms)
   wallpaper.rs      current desktop wallpaper, per platform
-  settings.rs       everything persisted, plus presets
+  settings/
+    mod.rs          config paths, presets, load/save
+    prefs.rs          └─ application behaviour, edited in Preferences
+    style.rs          └─ the look of one shot; this is what a Preset stores
+    ratio.rs          └─ output shape and the social-media sizes
+    watermark.rs      └─ watermark position and lettering
+  prefs_ui/
+    mod.rs          the Preferences window: `shotr --settings`
+    permission.rs     └─ the screen recording grant                (macOS only)
+    sections.rs     general, export and redaction policy
+    about.rs        shortcuts and version, read-only
   annotate.rs       annotation layers and their rasterisation
   export.rs         encoding and save dialogs
   history.rs        recent shots
@@ -94,26 +109,36 @@ and macOS *can* hide a window, so they do not need the trick — they use it
 anyway, because one capture path known to work everywhere beats two. Do not
 "simplify" this back into one process.
 
-**Fullscreen on macOS means a Space of its own.** `with_fullscreen(true)` maps to
-winit's `Fullscreen::Borderless`, which on macOS is `toggleFullScreen:` — the
-picker slides off to a new Space with the animation to match, and a screenshot
-overlay that takes a second to arrive is not an overlay. Worse, it is invisible
-from anywhere else: with the picker up, `screencapture` of every display showed
-only wallpaper, because each display captures its *active* Space. So macOS
-positions the picker by hand instead, over the monitor holding the pointer. The
-menu bar and the Dock still float above it — they sit at window levels no
-ordinary window can ask for — and that is the one part of the screen not covered.
+**macOS has no shotr picker, and that is deliberate.** Region and window capture
+there run `/usr/sbin/screencapture -i`, so the crosshair, the live dimensions,
+space to switch to window mode and escape to cancel are all Apple's UI. Shottr
+and Xnapper both do exactly this — measured with `pgrep -x screencapture` while
+their pickers were open — and `otool -L` on Xnapper shows *no* reference to
+ScreenCaptureKit, so the system tool alone is enough for a shipping beautifier.
 
-**Only macOS needs the pointer's monitor.** Windows and Wayland put a borderless
-fullscreen surface on the monitor that already has focus, which is the wanted
-behaviour and costs nothing; `capture::monitor_under_cursor` is `cfg(macos)` for
-that reason and not because the others were forgotten. On macOS the pointer comes
-from `CGEventCreate`/`CGEventGetLocation`, declared by hand the way `ipc` declares
-its Win32 calls. It agrees with `xcap::Monitor::from_point`, which is
-`CGGetDisplaysWithPoint` underneath, and with `monitor_bounds`, which is
-`CGDisplayBounds` — all three are logical points about one origin, and that is
-also the unit a window position is given in. The warning below about `xcap`
-geometry is about the *Linux* backend; it does not apply to these.
+That retired a pile of workarounds: a hand-positioned picker window (because
+`with_fullscreen` on macOS is `toggleFullScreen:`, which throws the window into a
+Space of its own), `capture::monitor_under_cursor` and its `CGEventCreate` FFI,
+`monitor_bounds`, and the menu bar and Dock never being covered. Apple's overlay
+covers them.
+
+**Two capture paths on macOS is a decision, not drift.** The rule elsewhere in
+this file is that one path everywhere beats two. The exception exists because
+xcap reaches macOS through `CGWindowListCreateImage`, which Apple *obsoleted* in
+15.0 — it still links only because `objc2-core-graphics` redeclares it in Rust
+and dodges the C availability attribute. Do not "simplify" macOS back onto xcap.
+
+**TCC attributes screen recording to the responsible process.** A child
+`screencapture` inherits the grant given to `shotr.app`, which is what makes the
+whole approach work. This was misread once: `screencapture -i` run from a shell
+without the grant fails with `could not create image from rect`, and that was
+briefly taken to mean the approach was impossible. It meant the *shell* had no
+grant. Permission has to be given to the bundle in `/Applications`; a binary run
+from a terminal borrows the terminal's grant instead.
+
+**No `-r` on `screencapture`.** Measured: it changes the dpi metadata only, never
+a pixel, and `export` re-encodes so the source dpi never reaches the output file.
+It looks tidy to add. It does nothing.
 
 **`crop_imm` clamps, and a clamped miss is a 0×0 image.** The editor keeps the
 whole desktop snapshot, not only the image it is editing: `--capture --full
@@ -125,51 +150,56 @@ miss into an empty image. A zero-sized texture ends the process. Hence both
 whole desktop for any rectangle not wholly inside, which is the rule an unknown
 monitor index already followed.
 
-**The windowed Select screen is reachable only from "Back to selection".** The
-picker draws no sidebar at all, so that button is the single door to History,
-"Open file…" and "From clipboard" — remove it and three features leave with it,
-silently, since nothing stops compiling. It was removed once for exactly that
-reason and put straight back.
+That fallback is also what makes macOS need no special case: there `monitor_views`
+is empty, because Apple's overlay returns a finished image rather than a desktop to
+slice, so every rectangle misses and `apply_source` becomes a no-op on its own.
 
-**The tray menu is where you choose what to capture, and the only place.** A
-region, one whole screen (or all of them), or one window — decided before
-anything is grabbed, because that decision *is* the capture. The editor shows
-what it was handed and offers no way to change it: a source dropdown there
-re-opens a question already answered, and answering it a second time meant
-re-cutting an image the editor might not even hold. `tray::Command` is the whole
-vocabulary; every entry maps to one `shotr --capture …` invocation.
+**History, "Open image…" and "From clipboard" live on the tray menu.** They used
+to hang off the windowed Select screen, reachable only by capturing first and
+then pressing "Back to selection" — and that button was removed once for looking
+redundant, taking three features with it silently, since nothing stops compiling.
+macOS no longer passes through that screen at all, so the tray is now the door:
+`--history` opens it as a hub, `--clipboard` goes straight to the editor. On Linux
+and Windows the Select screen still exists and keeps its buttons too.
 
-**`xcap::Window::all()` is not a list of windows.** On macOS it is
-`CGWindowListCopyWindowInfo` passed through with no filter whatsoever — every
-layer the window server composites. Unfiltered, the menu offered one entry per
-menu bar icon, the menu bar itself, the recording indicator, a 64×64 app badge
-and a "Gesture Blocking Overlay" for each window parked in Stage Manager, and a
-1×1 window at (1e9, 1e9). `winlist::worth_offering` is the filter, and it is
-geometric wherever it can be, because names are localised and process names are
-not.
+**The tray menu is where you choose what to capture.** A region, one whole screen
+(or all of them), or one window — decided before anything is grabbed, because
+that decision *is* the capture. The editor shows what it was handed and offers no
+way to change it: a source dropdown there re-opens a question already answered.
+`tray::Command` is the whole vocabulary and `Command::args` is the single mapping
+from an entry to a `shotr …` invocation, so a new variant that forgets one fails a
+test rather than silently launching the daemon.
 
-**A window in Stage Manager is captured as its tilted thumbnail.** The window
-server reports a parked window at the *tile's* geometry — Slack, really
-1440×900, came back as 128×169 — and hands over the perspective-warped preview
-Stage Manager draws. `screencapture -l<id>`, Apple's own tool, returns exactly
-the same skewed 256×338 image, which is how this was settled: nothing reachable
-through `CGWindowListCreateImage` sees the real window. So `winlist::raise`
-brings the application forward first and waits for it to arrive, which is the
-only lever there is. It runs for every window, not only parked ones, because a
-parked window cannot be told apart from a small one — all we can read is a size,
-and 128×169 is a size a window is allowed to be.
+macOS is the exception for windows only: its entry runs `screencapture -i -W` and
+lets Apple's overlay name them, because a menu of windows there would ask the same
+question twice.
 
-**`ActivateAllWindows` alone will not do it.** macOS lets one application
-activate another only when the *asking* one is already frontmost, and the
-process doing this has no window at all — it is about to take a screenshot.
-Without `ActivateIgnoringOtherApps` beside it, the call is accepted and quietly
-does nothing: Slack stayed at 128×152 in the strip and was photographed there.
-That flag is deprecated and has no replacement for this case.
+**`xcap::Window::all()` is not a list of windows.** On Windows it is worth
+filtering — `winlist::worth_offering` drops our own window and anything the size
+of an icon. It used to matter far more on macOS, where the same call is
+`CGWindowListCopyWindowInfo` passed through unfiltered: every layer the window
+server composites, including one entry per menu bar icon, the menu bar itself, the
+recording indicator, a 64×64 app badge, a "Gesture Blocking Overlay" per window
+parked in Stage Manager, and a 1×1 window at (1e9, 1e9). macOS no longer goes
+through xcap, which retired that filter *and* the Stage Manager workaround below.
+
+**Stage Manager used to hand over a tilted thumbnail, and that is gone with
+xcap.** Kept because it explains why macOS window capture is Apple's job now: the
+window server reported a parked window at the *tile's* geometry — Slack, really
+1440×900, came back as 128×169 — and handed over the perspective-warped preview.
+`screencapture -l<id>` returned the same skewed image, so nothing reachable
+through `CGWindowListCreateImage` saw the real window. The old fix raised the
+application first and waited, using `ActivateIgnoringOtherApps` beside
+`ActivateAllWindows` because macOS lets one app activate another only when the
+asking one is frontmost. If macOS window capture is ever reopened, start here.
 
 **A tray menu that lists windows has to be rebuilt, and only Linux gets that for
 free.** `ksni` asks for the menu each time one opens, so `window_items` is always
 current. `tray-icon` hands the menu to the system, which shows it without telling
-us — a list built at startup would name windows that closed hours ago.
+us — a list built at startup would name windows that closed hours ago. Windows
+still needs this. macOS no longer does, since every entry in its menu is static,
+but it runs the rebuild anyway: one path that is correct everywhere beats a `cfg`
+that has to be re-reasoned about, and the rebuild is two cheap system calls.
 
 **Never rebuild that menu on the click.** `set_menu` is
 `NSStatusItem.setMenu:`, and tray-icon's `mouseDown:` reports the click and
@@ -214,14 +244,27 @@ preview and the exported file identical code. Anything that draws must go
 through `render/`, not be special-cased for one of the two. This is the main
 reason not to move the UI to a webview.
 
-**`xcap::Monitor` geometry is not in pixels.** On this compositor it reports
-`10320x4320` for a screen that captures at `3440x1440`. The captured frame is
-the only honest number; positions are corrected by the ratio between the two.
-See `capture::scaled_origin`.
+**Reported monitor geometry is not in captured pixels, and the correction is
+global.** On this compositor `xcap::Monitor` reports `10320x4320` for a screen
+that captures at `3440x1440`; on macOS `CGDisplayBounds` gives logical points
+against a backing-pixel capture. Either way the captured frame is the only honest
+number, so `MonitorShot` carries the reported rectangle *uncorrected* and
+`capture::layout` scales everything at once.
 
-**`xcap::Window::all()` returns nothing on Wayland.** It works on Windows and
-macOS. `winlist` picks the implementation; `wl_windows` speaks
-`ext_foreign_toplevel_list_v1` and `ext_image_copy_capture_v1` directly.
+It has to be one shared factor, not one per monitor. Scaling each monitor by its
+own ratio put a Retina laptop and a 1× panel in different coordinate spaces:
+measured on a real Mac, an ultrawide physically 1.91× the laptop's width came out
+at 0.96×, and side by side the two rectangles overlapped by 1800px. `S =
+max(scale)` wins over `min` because upscaling the coarser monitor only makes it
+soft while downscaling the finer one destroys detail that exists — at the cost of
+a bigger canvas (6880×5218 against 4529×3778 on that machine), and `desktop_full`
+is held for the whole session. A uniform-scale desktop resamples nothing, which is
+what keeps Linux and Windows byte-identical; there is a test for exactly that.
+
+**`xcap::Window::all()` returns nothing on Wayland.** It works on Windows.
+`winlist` picks the implementation: `wl_windows` speaks
+`ext_foreign_toplevel_list_v1` and `ext_image_copy_capture_v1` directly, and macOS
+hands the whole question to `screencapture -i -W`.
 
 **`ocrs` cannot produce Vietnamese.** Its recognition model has a fixed ASCII
 alphabet — no `ă â đ ê ô ơ ư`, no tone marks — so it is not merely worse at
@@ -288,9 +331,15 @@ whoever is debugging, not by whoever is taking a screenshot.
 **Verify on the machine, not from memory.** This codebase is full of places
 where the documented behaviour and the actual behaviour differ. Before
 concluding something is impossible, check whether it is the chosen *library*
-that cannot do it rather than the platform — that mistake has been made twice
-here, with tray icons and with window listing, and both turned out to be
-possible.
+that cannot do it rather than the platform — that mistake has been made three
+times here, with tray icons, with window listing, and with macOS capture, and all
+three turned out to be possible.
+
+The macOS one is worth reading as a method. Three rounds of reading binaries
+(`nm -u` showing `NSWindow`, Swift class names like `RegionSelector`, a
+`mach-register` entitlement) all pointed the wrong way; one `pgrep -x
+screencapture` while the picker was open settled it in seconds. Prefer watching
+the program run over inferring from what it links.
 
 ## Licence
 
@@ -303,11 +352,23 @@ GPLv2 direction — is a licensing decision, not a routine `cargo add`.
 
 | | Linux | Windows | macOS |
 |---|---|---|---|
-| Screen capture | xcap | xcap | xcap |
-| Window capture | Wayland protocols | xcap | xcap |
+| Region picker | shotr's own, over a pre-shot | shotr's own | `screencapture -i` |
+| Screen capture | xcap | xcap | `screencapture -D N` |
+| Window capture | Wayland protocols | xcap | `screencapture -i -W` |
+| Window list in tray | yes | yes | no — the overlay lists them |
 | Tray daemon | ksni (SNI over D-Bus) | tray-icon on winit | tray-icon on winit |
 | Single instance | unix socket | named pipe | unix socket |
+| Screen recording grant | — | — | TCC, per bundle |
 | OCR (Vietnamese) | tesseract | tesseract if installed | tesseract if installed |
 
-`cargo check --target x86_64-pc-windows-gnu` covers Windows from Linux. macOS
-cannot be cross-checked without Apple's SDK; CI builds it on a real runner.
+`cargo check --target x86_64-pc-windows-gnu` covers Windows; it needs
+`mingw-w64`. Run it — `capture/xcap.rs` is `cfg`-ed out on macOS, so a syntax
+error in it passes a host build and fails only there. That has already happened
+once.
+
+macOS cannot be cross-checked without Apple's SDK; CI builds it on a real runner.
+
+**Permissions on macOS need a stable signature.** The linker's ad-hoc signature is
+computed from the binary's bytes, so every rebuild is a different app and every
+grant has to be given again. Sign with any identity — `SHOTR_SIGN_IDENTITY` — and
+the grant survives rebuilds. See `packaging/README.md`.

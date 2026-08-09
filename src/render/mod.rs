@@ -1,7 +1,7 @@
 //! The compositing pipeline.
 //!
 //! Order matters: annotate → balance → inset frame → shadow → background →
-//! ratio fit → watermark. Everything is driven by `Settings` plus a `scale`
+//! ratio fit → watermark. Everything is driven by `Style` plus a `scale`
 //! factor so the on-screen preview and the full-resolution export run identical
 //! code.
 
@@ -15,12 +15,12 @@ use ab_glyph::FontArc;
 use image::{Rgba, RgbaImage};
 
 use crate::annotate::Layer;
-use crate::settings::{Ratio, Settings};
+use crate::settings::{Ratio, Style};
 use frame::{Shadow, blend, rounded_coverage};
 
 pub struct Scene<'a> {
     pub shot: &'a RgbaImage,
-    pub settings: &'a Settings,
+    pub style: &'a Style,
     /// 1.0 for export, <1.0 for the preview.
     pub scale: f32,
     pub bg_image: Option<&'a RgbaImage>,
@@ -32,10 +32,10 @@ pub struct Scene<'a> {
 
 impl<'a> Scene<'a> {
     /// A scene with no annotations — handy in tests and for one-off renders.
-    pub fn plain(shot: &'a RgbaImage, settings: &'a Settings, scale: f32) -> Self {
+    pub fn plain(shot: &'a RgbaImage, style: &'a Style, scale: f32) -> Self {
         Self {
             shot,
-            settings,
+            style,
             scale,
             bg_image: None,
             font: None,
@@ -106,7 +106,7 @@ pub fn render(scene: &Scene) -> RgbaImage {
 }
 
 pub fn render_detailed(scene: &Scene) -> Rendered {
-    let s = scene.settings;
+    let s = scene.style;
     let scale = scene.scale.max(0.01);
 
     // 1. Annotations are baked into the screenshot before anything else, so
@@ -340,7 +340,7 @@ mod tests {
     fn render_produces_the_size_layout_promised() {
         let shot = RgbaImage::from_pixel(400, 300, Rgba([10, 120, 200, 255]));
         for ratio in [Ratio::Auto, Ratio::Aspect(1.0), Ratio::Size(600, 600)] {
-            let settings = Settings {
+            let settings = Style {
                 ratio,
                 ..Default::default()
             };
@@ -353,7 +353,7 @@ mod tests {
     #[test]
     fn transparent_background_keeps_alpha_at_the_corners() {
         let shot = RgbaImage::from_pixel(200, 150, Rgba([255, 0, 0, 255]));
-        let settings = Settings {
+        let settings = Style {
             background: crate::settings::Background::None,
             shadow: 0,
             ..Default::default()
@@ -371,7 +371,7 @@ mod tests {
     #[test]
     fn content_rect_reports_where_the_shot_landed() {
         let shot = RgbaImage::from_pixel(400, 300, Rgba([0, 0, 0, 255]));
-        let settings = Settings {
+        let settings = Style {
             padding: 50,
             inset: 10,
             shadow: 0,
@@ -384,7 +384,7 @@ mod tests {
     #[test]
     fn canvas_and_shot_coordinates_round_trip() {
         let shot = RgbaImage::from_pixel(400, 300, Rgba([0, 0, 0, 255]));
-        let settings = Settings {
+        let settings = Style {
             padding: 40,
             shadow: 0,
             ..Default::default()
@@ -408,7 +408,7 @@ mod tests {
                 shot.put_pixel(x, y, Rgba([10, 10, 10, 255]));
             }
         }
-        let settings = Settings {
+        let settings = Style {
             balance: true,
             padding: 20,
             shadow: 0,
@@ -430,7 +430,7 @@ mod tests {
     #[test]
     fn annotations_reach_the_output() {
         let shot = RgbaImage::from_pixel(200, 200, Rgba([255, 255, 255, 255]));
-        let settings = Settings {
+        let settings = Style {
             padding: 0,
             radius: 0,
             shadow: 0,

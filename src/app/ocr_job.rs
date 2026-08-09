@@ -126,13 +126,13 @@ impl ShotrApp {
     }
 
     fn kind_enabled(&self, kind: Secret) -> bool {
-        let s = &self.settings;
+        let policy = &self.prefs;
         match kind {
-            Secret::Email => s.redact_email,
-            Secret::CreditCard => s.redact_card,
-            Secret::IpAddress => s.redact_ip,
-            Secret::ApiKey => s.redact_key,
-            Secret::Phone => s.redact_phone,
+            Secret::Email => policy.redact_email,
+            Secret::CreditCard => policy.redact_card,
+            Secret::IpAddress => policy.redact_ip,
+            Secret::ApiKey => policy.redact_key,
+            Secret::Phone => policy.redact_phone,
         }
     }
 
@@ -153,7 +153,7 @@ impl ShotrApp {
     pub(crate) fn all_layers(&self) -> Vec<Layer> {
         let mut out = Vec::new();
 
-        if self.settings.redact {
+        if self.prefs.redact {
             for finding in &self.ocr_findings {
                 if self.kind_enabled(finding.kind)
                     && let Some(rect) = self.finding_rect(finding)
@@ -186,18 +186,18 @@ impl ShotrApp {
     }
 
     fn redaction_layer(&self, rect: [f32; 4]) -> Layer {
-        let s = &self.settings;
-        let kind = match s.redact_style {
+        let look = &self.style;
+        let kind = match look.redact_style {
             RedactStyle::Solid => Tool::Fill,
             RedactStyle::Blur => Tool::Blur,
         };
         let mut layer = Layer::new(
             kind,
             [rect[0], rect[1]],
-            s.redact_color,
+            look.redact_color,
             1.0,
             12.0,
-            s.redact_blur,
+            look.redact_blur,
         );
         layer.b = [rect[2], rect[3]];
         layer

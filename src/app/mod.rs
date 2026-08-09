@@ -16,16 +16,14 @@ use image::{Rgba, RgbaImage};
 use std::path::PathBuf;
 
 use crate::annotate::{self, Layer, Tool};
-use crate::capture::{
-    make_preview,
-};
+use crate::capture::make_preview;
 use crate::export;
 use crate::history;
 use crate::ocr::Word;
 use crate::ocr::detect::Finding;
 use crate::render::background::BG_PRESETS;
-use crate::render::{Geometry, Scene, render, render_detailed, text};
-use crate::settings::{Background, Preset, Rgba8, Settings};
+use crate::render::{Geometry, Scene, render, render_detailed};
+use crate::settings::{Background, Prefs, Preset, Rgba8, Style};
 use ocr_job::OcrState;
 
 /// What this process was launched to do.
@@ -59,6 +57,14 @@ pub enum Start {
     Window(RgbaImage),
     OpenPath(PathBuf),
     OpenDialog,
+    /// Whatever image is on the clipboard, straight to the editor.
+    Clipboard,
+    /// The hub: no capture, just the recent shots and the other ways in.
+    ///
+    /// This screen used to be reachable only by capturing first and then going
+    /// "back to selection". macOS no longer passes through it at all — Apple's
+    /// overlay returns a finished region — so the tray opens it directly.
+    History,
 }
 
 pub(crate) const SIDEBAR_W: f32 = 336.0;
@@ -200,8 +206,10 @@ pub struct ShotrApp {
     // Capture flow (X11 only): hide the window, then shoot at `pending_capture`.
     pub(crate) pending_capture: Option<f64>,
 
-    pub(crate) settings: Settings,
-    pub(crate) prev_settings: Settings,
+    pub(crate) style: Style,
+    pub(crate) prev_style: Style,
+    pub(crate) prefs: Prefs,
+    pub(crate) prev_prefs: Prefs,
     pub(crate) save_settings_at: Option<f64>,
 
     pub(crate) presets: Vec<Preset>,
@@ -269,6 +277,9 @@ pub struct ShotrApp {
 
     /// True while the window covers the screen for region picking.
     pub(crate) picking_fullscreen: bool,
+    /// Opened from the tray with no capture behind it, so the Select screen is
+    /// a hub rather than a region picker.
+    pub(crate) hub: bool,
     /// Background colour detected in the current screenshot, for the Inset UI.
     pub(crate) detected_inset: Option<Rgba8>,
     pub(crate) show_custom_size: bool,
@@ -292,12 +303,12 @@ impl ShotrApp {
         source: Source,
         views: Vec<crate::capture::MonitorView>,
     ) -> Self {
-        let font = setup_fonts(&cc.egui_ctx);
-        theme::apply(&cc.egui_ctx);
+        let font = theme::apply(&cc.egui_ctx);
         let placeholder = RgbaImage::from_pixel(640, 360, Rgba([28, 30, 38, 255]));
-        let settings = Settings::load();
+        let style = Style::load();
+        let prefs = Prefs::load();
         // Before any string is drawn, so the first frame is already translated.
-        crate::i18n::set(settings.lang);
+        crate::i18n::set(prefs.lang);
 
         let mut app = Self {
             capture_full: placeholder.clone(),
@@ -320,8 +331,10 @@ impl ShotrApp {
             desktop_full: placeholder.clone(),
             monitor_views: views,
             pending_capture: None,
-            prev_settings: settings.clone(),
-            settings,
+            prev_style: style.clone(),
+            style,
+            prev_prefs: prefs.clone(),
+            prefs,
             save_settings_at: None,
             presets: crate::settings::load_presets(),
             preset_name: String::new(),
@@ -362,6 +375,7 @@ impl ShotrApp {
             status: String::new(),
             clipboard: arboard::Clipboard::new().ok(),
             picking_fullscreen: matches!(start, Start::Picker(_)),
+            hub: matches!(start, Start::History),
             detected_inset: None,
             show_custom_size: false,
             text_caret: 0,
@@ -395,6 +409,18 @@ impl ShotrApp {
                 Some(path) => app.open_image(&path),
                 None => std::process::exit(0),
             },
+            // Nothing on the clipboard leaves the hub up with the reason showing,
+            // rather than closing on someone who just mis-clicked.
+            Start::Clipboard => {
+                app.open_from_clipboard();
+                if app.mode != Mode::Edit {
+                    app.mode = Mode::Select;
+                }
+            }
+            Start::History => {
+                app.mode = Mode::Select;
+                app.status = t("Pick a recent shot, open a file, or paste from the clipboard.").into();
+            }
         }
         app
     }
@@ -476,7 +502,7 @@ impl ShotrApp {
             return;
         };
         match crate::winlist::capture(&window.identifier) {
-            Ok(img) => {
+            Ok(Some(img)) => {
                 self.shot_full = img;
                 self.enter_edit();
                 if let Some(entry) = history::record(&self.shot_full) {
@@ -485,6 +511,8 @@ impl ShotrApp {
                     self.history_thumbs.clear();
                 }
             }
+            // Cancelled out of the picker: stay where we are and say nothing.
+            Ok(None) => {}
             Err(e) => self.status = format!("Could not capture the window: {e}"),
         }
     }
@@ -665,10 +693,10 @@ impl ShotrApp {
                         self.enter_edit();
                         self.status = tf("Pasted a {w}×{h} image from the clipboard", &[("w", &w.to_string()), ("h", &h.to_string())]);
                     }
-                    None => self.status = "Ảnh trong clipboard không hợp lệ".into(),
+                    None => self.status = t("The clipboard image is not valid").into(),
                 }
             }
-            Err(e) => self.status = format!("Clipboard không có ảnh: {e}"),
+            Err(e) => self.status = tf("No image on the clipboard: {err}", &[("err", &e.to_string())]),
         }
     }
 
@@ -676,12 +704,12 @@ impl ShotrApp {
 
     /// Load the wallpaper or custom image if the current background needs one.
     fn sync_bg_image(&mut self) {
-        let wanted: Option<PathBuf> = match self.settings.background {
+        let wanted: Option<PathBuf> = match self.style.background {
             Background::Desktop => crate::wallpaper::current(),
             Background::Custom
-                if self.settings.custom_bg.kind == crate::settings::CustomKind::Image =>
+                if self.style.custom_bg.kind == crate::settings::CustomKind::Image =>
             {
-                self.settings.custom_bg.image.clone()
+                self.style.custom_bg.image.clone()
             }
             _ => None,
         };
@@ -700,7 +728,7 @@ impl ShotrApp {
     /// Load the watermark logo when its path changes. Same shape as the
     /// background image cache: decode once, keep it until the path moves.
     fn sync_wm_image(&mut self) {
-        let wanted = self.settings.watermark_image.clone();
+        let wanted = self.style.watermark_image.clone();
         if wanted == self.wm_image_key {
             return;
         }
@@ -720,7 +748,7 @@ impl ShotrApp {
     ) -> Scene<'a> {
         Scene {
             shot,
-            settings: &self.settings,
+            style: &self.style,
             scale,
             bg_image: self.bg_image.as_ref(),
             font: self.font.as_ref(),
@@ -783,9 +811,9 @@ impl ShotrApp {
     }
 
     pub(crate) fn do_save(&mut self, path: Option<PathBuf>) {
-        let path = path.unwrap_or_else(|| export::default_path(&self.settings));
+        let path = path.unwrap_or_else(|| export::default_path(&self.prefs));
         let out = self.full_render();
-        match export::save(&out, &path, &self.settings) {
+        match export::save(&out, &path, &self.prefs) {
             Ok(()) => self.status = tf("Saved: {path}", &[("path", &path.display().to_string())]),
             Err(e) => self.status = format!("Save failed: {e}"),
         }
@@ -814,7 +842,7 @@ impl ShotrApp {
 
     /// Open the folder exports land in, with whatever the desktop uses.
     pub(crate) fn open_output_dir(&mut self) {
-        let dir = crate::settings::pictures_dir().join("shotr");
+        let dir = self.prefs.save_dir().join("shotr");
         let _ = std::fs::create_dir_all(&dir);
         match std::process::Command::new("xdg-open").arg(&dir).spawn() {
             Ok(_) => self.status = tf("Opened {path}", &[("path", &dir.display().to_string())]),
@@ -824,7 +852,8 @@ impl ShotrApp {
 
     pub(crate) fn copy_and_close(&mut self, ctx: &egui::Context) {
         self.do_copy();
-        self.settings.save();
+        self.style.save();
+        self.prefs.save();
         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
     }
 
@@ -838,7 +867,7 @@ impl ShotrApp {
         }
         let preset = Preset {
             name: name.clone(),
-            settings: self.settings.clone(),
+            style: self.style.clone(),
         };
         match self.presets.iter_mut().find(|p| p.name == name) {
             Some(existing) => *existing = preset,
@@ -896,18 +925,26 @@ impl eframe::App for ShotrApp {
                 .show_inside(ui, |ui| self.bottom_bar(ui));
         }
 
-        if self.settings != self.prev_settings {
-            if self.settings.custom_bg != self.prev_settings.custom_bg {
+        if self.style != self.prev_style {
+            if self.style.custom_bg != self.prev_style.custom_bg {
                 self.swatches_dirty = true;
             }
-            self.prev_settings = self.settings.clone();
+            self.prev_style = self.style.clone();
+            self.dirty = true;
+            self.save_settings_at = Some(ctx.input(|i| i.time) + 1.0);
+        }
+        // Preferences repaint too: the redaction policy lives here and decides
+        // what gets covered.
+        if self.prefs != self.prev_prefs {
+            self.prev_prefs = self.prefs.clone();
             self.dirty = true;
             self.save_settings_at = Some(ctx.input(|i| i.time) + 1.0);
         }
         if let Some(t) = self.save_settings_at {
             if ctx.input(|i| i.time) >= t {
                 self.save_settings_at = None;
-                self.settings.save();
+                self.style.save();
+                self.prefs.save();
             } else {
                 ctx.request_repaint_after(std::time::Duration::from_millis(250));
             }
@@ -1081,31 +1118,27 @@ fn fit_texture(img: &RgbaImage, limit: u32) -> Option<RgbaImage> {
     ))
 }
 
+/// The icon every shotr window carries.
+///
+/// eframe sets the application icon at runtime from `ViewportBuilder`, and its
+/// default is eframe's own logo — which silently overrides the `.icns` in the
+/// bundle, so the Dock showed a black hexagon. Drawing it here keeps the Dock on
+/// the same source as the tray, the launcher and the `.icns`: `render::icon`.
+pub fn window_icon() -> egui::IconData {
+    const PX: u32 = 256;
+    let image = crate::render::icon::icon_image(PX);
+    egui::IconData {
+        rgba: image.into_raw(),
+        width: PX,
+        height: PX,
+    }
+}
+
 pub(crate) fn to_color_image(img: &RgbaImage) -> egui::ColorImage {
     egui::ColorImage::from_rgba_unmultiplied(
         [img.width() as usize, img.height() as usize],
         img.as_raw(),
     )
-}
-
-/// Load a Vietnamese-capable system font for the UI, and hand the same font
-/// back for watermark rasterising. egui's default lacks Vietnamese diacritics.
-fn setup_fonts(ctx: &egui::Context) -> Option<FontArc> {
-    let (data, font) = text::load_system_font()?;
-    let mut fonts = egui::FontDefinitions::default();
-    fonts.font_data.insert(
-        "viet".to_owned(),
-        std::sync::Arc::new(egui::FontData::from_owned(data)),
-    );
-    for fam in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
-        fonts
-            .families
-            .entry(fam)
-            .or_default()
-            .insert(0, "viet".to_owned());
-    }
-    ctx.set_fonts(fonts);
-    Some(font)
 }
 
 #[cfg(test)]

@@ -87,6 +87,25 @@ impl ksni::Tray for ShotrTray {
                 ..Default::default()
             }
             .into(),
+            StandardItem {
+                label: t("Recent shots…").into(),
+                activate: Box::new(|t: &mut Self| t.send(Command::History)),
+                ..Default::default()
+            }
+            .into(),
+            StandardItem {
+                label: t("From clipboard").into(),
+                activate: Box::new(|t: &mut Self| t.send(Command::FromClipboard)),
+                ..Default::default()
+            }
+            .into(),
+            MenuItem::Separator,
+            StandardItem {
+                label: t("Preferences…").into(),
+                activate: Box::new(|t: &mut Self| t.send(Command::Preferences)),
+                ..Default::default()
+            }
+            .into(),
             SubMenu {
                 label: t("Help").into(),
                 submenu: vec![

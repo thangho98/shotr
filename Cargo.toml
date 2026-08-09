@@ -48,7 +48,6 @@ winit = "0.30.13"
 # the features — but `winlist` uses it directly, so it is declared directly.
 # MIT, which the GPL can absorb.
 [target.'cfg(target_os = "macos")'.dependencies]
-objc2-app-kit = { version = "0.3.2", features = ["NSRunningApplication"] }
 
 [profile.release]
 # The OCR stack (rten) drags in a lot of symbols; stripping roughly halves the

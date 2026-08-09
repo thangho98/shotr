@@ -27,6 +27,9 @@ shotr — chụp và làm đẹp ảnh màn hình
     shotr --capture --monitor N   Mở sẵn ở màn hình thứ N (đếm từ 0)
     shotr --capture --window ID   Chụp một cửa sổ, vào thẳng trình sửa
     shotr --open [FILE]  Mở một ảnh có sẵn
+    shotr --clipboard    Mở ảnh đang có trong clipboard
+    shotr --history      Mở danh sách ảnh chụp gần đây
+    shotr --settings     Mở cửa sổ tuỳ chọn
     shotr --help         Hiển thị trợ giúp này
 
 Mỗi lần chụp chạy trong một tiến trình riêng và chụp *trước khi* mở cửa sổ.
@@ -50,6 +53,89 @@ fn monitor_arg(args: &[String]) -> Option<usize> {
     arg_after(args, "--monitor").and_then(|v| v.parse().ok())
 }
 
+/// One window, straight to the editor. `None` means nothing to show — the user
+/// cancelled, or the failure was already reported.
+///
+/// The identifier comes from the tray and survives the trip between processes
+/// because every backend hands out one meant to: `ext_foreign_toplevel_list_v1`
+/// says so in as many words, and elsewhere it is the window id the system uses.
+/// macOS ignores it — Apple's overlay does the choosing there.
+fn window_shot(id: Option<&String>) -> Option<image::RgbaImage> {
+    let id = id.map(String::as_str).unwrap_or_default();
+    match winlist::capture(id) {
+        Ok(img) => img,
+        Err(e) => {
+            eprintln!("Could not capture that window: {e}");
+            None
+        }
+    }
+}
+
+/// The desktop, or one screen of it, plus where each monitor landed. `None`
+/// means nothing to show.
+#[cfg(not(target_os = "macos"))]
+fn screen_shot(full: bool, _monitor: Option<usize>) -> Option<(Start, Vec<capture::MonitorView>)> {
+    // Always grab every monitor. The editor slices this one snapshot to show a
+    // single screen, so `--monitor N` picks the starting view, not a narrower
+    // capture — and switching later never re-shoots.
+    match capture::capture_desktop() {
+        Ok((shot, views)) => {
+            let start = if full {
+                Start::Editor(shot)
+            } else {
+                Start::Picker(shot)
+            };
+            Some((start, views))
+        }
+        Err(e) => {
+            eprintln!("Capture failed: {e}");
+            None
+        }
+    }
+}
+
+/// macOS has no windowed picker: without `--full` this is Apple's overlay, and
+/// what comes back is already the region the user chose.
+///
+/// `--monitor N` shoots that one screen rather than the whole desktop and then
+/// cutting, because the source was settled in the tray menu and the editor
+/// offers no way to change it.
+#[cfg(target_os = "macos")]
+fn screen_shot(full: bool, monitor: Option<usize>) -> Option<(Start, Vec<capture::MonitorView>)> {
+    if !full {
+        return interactive(capture::macos::Shot::Region).map(|img| (Start::Editor(img), Vec::new()));
+    }
+    if let Some(i) = monitor {
+        return match capture::capture_monitor(i) {
+            Ok(img) => Some((Start::Editor(img), Vec::new())),
+            Err(e) => {
+                eprintln!("Capture failed: {e}");
+                None
+            }
+        };
+    }
+    match capture::capture_desktop() {
+        Ok((shot, views)) => Some((Start::Editor(shot), views)),
+        Err(e) => {
+            eprintln!("Capture failed: {e}");
+            None
+        }
+    }
+}
+
+/// Hand the choice to Apple's overlay. Escape there is a cancel, and a cancel
+/// must leave no window and say nothing.
+#[cfg(target_os = "macos")]
+fn interactive(shot: capture::macos::Shot) -> Option<image::RgbaImage> {
+    match capture::macos::run(shot) {
+        Ok(img) => img,
+        Err(e) => {
+            eprintln!("Capture failed: {e}");
+            None
+        }
+    }
+}
+
 fn main() -> eframe::Result {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let has = |flag: &str| args.iter().any(|a| a == flag);
@@ -59,30 +145,25 @@ fn main() -> eframe::Result {
         return Ok(());
     }
 
+    // Preferences captures nothing, so it never reaches the paths below.
+    if has("--settings") {
+        return shotr::prefs_ui::run();
+    }
+
     // Plain `shotr` is the tray daemon. On Linux it has to be: a Wayland client
     // cannot hide its own window, so the only way to stay out of its own
     // screenshot is for no window to exist when the shutter fires. Windows and
     // macOS could hide a window instead, but a tray that is only there on one
     // of the three platforms is a worse deal than one capture path everywhere.
-    if !has("--capture") && !has("--open") {
+    let opens_a_window = ["--capture", "--open", "--clipboard", "--history"]
+        .iter()
+        .any(|f| has(f));
+    if !opens_a_window {
         std::process::exit(daemon::run());
     }
 
-    // The picker shows one screen at 1:1. On macOS it has to be told which,
-    // because its window is positioned by hand rather than made fullscreen —
-    // see `capture::monitor_under_cursor`. Only the picker: `--full` means the
-    // whole desktop, and a pointer resting somewhere must not narrow that.
     let named_monitor = monitor_arg(&args);
-    #[cfg(target_os = "macos")]
-    let picker_screen = if has("--capture") && !has("--full") && !has("--window") {
-        named_monitor.or_else(capture::monitor_under_cursor)
-    } else {
-        None
-    };
-    #[cfg(not(target_os = "macos"))]
-    let picker_screen: Option<usize> = None;
-
-    let source = match named_monitor.or(picker_screen) {
+    let source = match named_monitor {
         Some(i) => Source::Monitor(i),
         None => Source::All,
     };
@@ -94,69 +175,40 @@ fn main() -> eframe::Result {
             Some(path) => Start::OpenPath(path.into()),
             None => Start::OpenDialog,
         }
-    } else if let Some(id) = arg_after(&args, "--window") {
-        // Nothing to grab first: the compositor hands over that window's own
-        // buffer, which is why one sitting behind another still comes out whole.
-        // The identifier is the tray's — both backends hand out one meant to
-        // cross process boundaries.
-        match winlist::capture(id) {
-            Ok(img) => Start::Window(img),
-            Err(e) => {
-                eprintln!("Could not capture that window: {e}");
-                return Ok(());
-            }
+    } else if has("--clipboard") {
+        Start::Clipboard
+    } else if has("--history") {
+        Start::History
+    } else if has("--window") {
+        match window_shot(arg_after(&args, "--window")) {
+            Some(img) => Start::Window(img),
+            None => return Ok(()),
         }
     } else {
-        // Always grab every monitor. The editor slices this one snapshot to
-        // show a single screen, so `--monitor N` picks the starting view, not a
-        // narrower capture — and switching later never re-shoots.
-        match capture::capture_desktop() {
-            Ok((shot, v)) => {
+        match screen_shot(has("--full"), named_monitor) {
+            Some((start, v)) => {
                 views = v;
-                if has("--full") {
-                    Start::Editor(shot)
-                } else {
-                    Start::Picker(shot)
-                }
+                start
             }
-            Err(e) => {
-                eprintln!("Capture failed: {e}");
-                return Ok(());
-            }
+            None => return Ok(()),
         }
     };
 
     // The region picker covers the screen and shows the shot at 1:1, so it
-    // looks like you are selecting on the live desktop.
-    //
-    // Covering it means a borderless window over that monitor's rectangle, not
-    // fullscreen, wherever the rectangle can be known. Fullscreen on macOS is
-    // the *native* kind: a Space of its own and an animation to get there, which
-    // is a long way from Lightshot dropping an overlay in front of you. The menu
-    // bar and Dock still float above the window — they outrank every level a
-    // normal window can ask for — so they are the one part not covered.
-    #[cfg(target_os = "macos")]
-    let picker_bounds = picker_screen.and_then(capture::monitor_bounds);
-    #[cfg(not(target_os = "macos"))]
-    let picker_bounds: Option<[f32; 4]> = None;
-
+    // looks like you are selecting on the live desktop. macOS never reaches
+    // here: Apple's overlay did the picking before this process opened anything.
     let viewport = if matches!(start, Start::Picker(_)) {
-        let base = egui::ViewportBuilder::default()
+        egui::ViewportBuilder::default()
             .with_decorations(false)
-            .with_title("shotr");
-        match picker_bounds {
-            Some([x, y, w, h]) => base
-                .with_position(egui::pos2(x, y))
-                .with_inner_size([w, h])
-                .with_always_on_top(),
-            None => base.with_fullscreen(true),
-        }
+            .with_title("shotr")
+            .with_fullscreen(true)
     } else {
         egui::ViewportBuilder::default()
             .with_inner_size([1280.0, 820.0])
             .with_min_inner_size([900.0, 560.0])
             .with_title("shotr")
-    };
+    }
+    .with_icon(shotr::app::window_icon());
 
     eframe::run_native(
         "shotr",
