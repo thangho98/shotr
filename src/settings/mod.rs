@@ -43,9 +43,17 @@ pub fn config_dir() -> Option<PathBuf> {
 
 fn read_json<T: DeserializeOwned>(file: &str) -> Option<T> {
     let path = config_dir()?.join(file);
-    std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
+    let text = std::fs::read_to_string(&path).ok()?;
+    match serde_json::from_str(&text) {
+        Ok(value) => Some(value),
+        // Falling back to defaults is right — a broken file must not stop the
+        // app starting — but doing it in silence is not. Every setting resets
+        // at once and nothing says why, which reads as the app losing them.
+        Err(e) => {
+            eprintln!("{} could not be read, using defaults: {e}", path.display());
+            None
+        }
+    }
 }
 
 /// Best-effort persist; a read-only config dir must not break the app.
