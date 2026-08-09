@@ -1,9 +1,15 @@
-//! Shortcuts and version — read-only, on purpose.
+//! Version, and the keys the editor binds while an image is open.
 //!
-//! Editable shortcuts need a global hotkey library, and the obvious one is X11
-//! only, so it cannot work on Wayland at all; that is its own project rather
-//! than a checkbox. Auto-update is likewise. Listing what exists is honest and
-//! useful now, and neither section is an empty tab promising something absent.
+//! This file used to say editable shortcuts were out of reach, because a global
+//! hotkey library is X11 only and so cannot serve Wayland. That part still
+//! holds. What it missed is that **Linux needs no library**: COSMIC and GNOME
+//! already bind a command to a key, and macOS is the only platform with no way
+//! to do it at all. So the capture hotkeys moved to [`super::shortcuts`], which
+//! is editable exactly where the system provides nothing — and the keys here
+//! stayed, because they belong to a window rather than the whole desktop and
+//! nothing outside shotr can collide with them.
+//!
+//! Auto-update is still its own project.
 
 use eframe::egui;
 
@@ -23,7 +29,11 @@ const KEYS: &[(&str, &str)] = &[
     ("Esc", "Cancel"),
 ];
 
-pub fn shortcuts(ui: &mut egui::Ui) {
+/// What the editor binds while an image is open. These stay fixed: they are
+/// window shortcuts, not global ones, so nothing outside shotr can collide with
+/// them and there is nothing for a picker to resolve.
+pub fn editor_keys(ui: &mut egui::Ui) {
+    theme::section(ui, t("In the editor"));
     ui.label(
         egui::RichText::new(t("These are fixed for now."))
             .weak()
@@ -39,15 +49,6 @@ pub fn shortcuts(ui: &mut egui::Ui) {
             ui.label(t(what));
         });
     }
-    ui.add_space(12.0);
-    theme::section(ui, t("A shortcut for capturing"));
-    ui.label(
-        egui::RichText::new(t(
-            "Bind a system shortcut to: shotr --capture",
-        ))
-        .weak()
-        .small(),
-    );
 }
 
 pub fn version(ui: &mut egui::Ui) {

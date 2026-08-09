@@ -118,15 +118,19 @@ static VI: &[(&str, &str)] = &[
     ("Border radius", "Bo góc"),
     ("Cancel", "Huỷ"),
     ("Cannot reach the clipboard", "Không truy cập được clipboard"),
+    ("Capture a region", "Chụp một vùng"),
     ("Capture a region…", "✂ Chọn vùng chụp…"),
     ("Capture a whole screen", "🖥 Chụp nguyên màn hình"),
     ("Capture a window", "🗔 Chụp một cửa sổ"),
     ("Capture a window…", "Chụp một cửa sổ…"),
     ("Capture again", "📸 Chụp lại"),
+    ("Capture every screen", "Chụp mọi màn hình"),
     ("Card", "Thẻ"),
     ("Card numbers", "Số thẻ"),
     ("Change…", "Đổi…"),
     ("Choose a folder…", "Chọn thư mục…"),
+    ("Choose…", "Chọn…"),
+    ("Clear", "Xoá"),
     ("Clear all annotations", "Xoá hết chú thích"),
     ("Click a window in the list   ·   Space: back to region   ·   Esc: cancel", "Di chuột lên cửa sổ rồi bấm   ·   Space: chọn vùng   ·   Esc: huỷ"),
     ("Click a window in the list.", "Bấm một cửa sổ trong danh sách."),
@@ -136,8 +140,10 @@ static VI: &[(&str, &str)] = &[
     ("Colour", "Màu"),
     ("Copied to the clipboard", "Đã copy vào clipboard"),
     ("Copy", "Copy"),
+    ("Copy a region", "Copy một vùng"),
     ("Copy all", "Copy tất cả"),
     ("Copy and close on double-click", "Double-click ảnh = Copy và đóng"),
+    ("Copy every screen", "Copy mọi màn hình"),
     ("Copy the text in the image", "📋 Copy chữ trong ảnh"),
     ("Corner", "Góc"),
     ("Crop to selection", "Cắt vùng đã chọn"),
@@ -171,6 +177,7 @@ static VI: &[(&str, &str)] = &[
     ("IP addresses", "Địa chỉ IP"),
     ("If no dialog appeared, use the button beside this one.", "Nếu không thấy hộp thoại nào, dùng nút bên cạnh."),
     ("Image", "Ảnh"),
+    ("In the editor", "Trong trình sửa"),
     ("Insert the copyright sign", "Chèn ký hiệu bản quyền"),
     ("Inset", "Inset"),
     ("JPEG has no alpha channel — a transparent background becomes white.", "JPEG không có kênh alpha — nền trong suốt sẽ thành trắng."),
@@ -186,6 +193,7 @@ static VI: &[(&str, &str)] = &[
     ("No text found.", "Không thấy chữ nào."),
     ("No text to copy", "Không có chữ để copy"),
     ("No window to capture", "Không có cửa sổ nào để chụp"),
+    ("Not set", "Chưa đặt"),
     ("OCR model downloaded", "Đã tải model OCR"),
     ("Off", "Tắt"),
     ("Opacity", "Độ đục"),
@@ -194,6 +202,7 @@ static VI: &[(&str, &str)] = &[
     ("Open file…", "📂 Mở file…"),
     ("Open image folder", "📂 Mở thư mục ảnh"),
     ("Open image…", "📂 Mở ảnh…"),
+    ("Open recent shots", "Mở ảnh chụp gần đây"),
     ("Opened a new capture window.", "Đã mở cửa sổ chụp mới."),
     ("Opened {path}", "Đã mở {path}"),
     ("Outlined", "Viền chữ"),
@@ -213,6 +222,7 @@ static VI: &[(&str, &str)] = &[
     ("Preset name", "Tên preset"),
     ("Preset “{name}” deleted", "Đã xoá preset “{name}”"),
     ("Preset “{name}” saved", "Đã lưu preset “{name}”"),
+    ("Press a combination…", "Bấm tổ hợp phím…"),
     ("Protective tiling is usually 20–40% opacity at -30°.", "Lát chống dùng lại ảnh thường để 20–40% độ đục, xoay -30°."),
     ("Quality", "Chất lượng"),
     ("Quit", "Thoát"),
@@ -264,6 +274,7 @@ static VI: &[(&str, &str)] = &[
     ("Type — Enter to finish, Esc to cancel", "Gõ chữ — Enter xong, Esc bỏ"),
     ("Use the default", "Dùng mặc định"),
     ("Use the whole screen", "Dùng cả màn hình"),
+    ("Use {keys}", "Dùng {keys}"),
     ("Version", "Phiên bản"),
     ("Watermark", "Đóng dấu"),
     ("WebP is lossless here, so there is no quality slider.", "WebP ở đây chỉ lossless, nên không có thanh chất lượng."),
@@ -273,10 +284,13 @@ static VI: &[(&str, &str)] = &[
     ("Your presets", "Preset của anh"),
     ("Zoom", "Phóng"),
     ("Zoom in and out", "Phóng to, thu nhỏ"),
+    ("macOS cannot report shortcuts held by other apps. If one press does two things, choose another combination.", "macOS không cho biết phím tắt do app khác giữ. Nếu một lần bấm làm hai việc, hãy chọn tổ hợp khác."),
+    ("macOS is using {keys} for its own screenshot. Both will run.", "macOS đang dùng {keys} cho ảnh chụp của nó. Cả hai sẽ cùng chạy."),
     ("macOS reads this permission once when an app starts. After allowing it, quit shotr from the menu bar and start it again.", "macOS chỉ đọc quyền này một lần lúc app khởi động. Sau khi cấp, hãy thoát shotr từ menu bar rồi mở lại."),
     ("shotr cannot record the screen yet", "shotr chưa được phép ghi màn hình"),
     ("shotr — Preferences", "shotr — Tuỳ chọn"),
     ("{chars} characters copied", "Đã copy {chars} ký tự"),
+    ("{keys} now captures a region. Change it in Preferences.", "{keys} giờ dùng để chụp một vùng. Đổi trong Preferences."),
     ("{n} windows. Click one in the list.", "{n} cửa sổ. Bấm một cái trong danh sách giữa màn hình."),
     ("{n} words copied", "Đã copy {n} từ"),
 ];
@@ -375,7 +389,7 @@ mod tests {
         }
         assert!(
             missing.is_empty(),
-            "these strings are wrapped in t() but have no Vietnamese entry:\n  {}",
+            "these strings are wrapped in t() or tf() but have no Vietnamese entry:\n  {}",
             missing.join("\n  ")
         );
     }
@@ -394,29 +408,47 @@ mod tests {
         }
     }
 
-    /// Pull the string out of every `t("…")` call. Deliberately simple: it only
-    /// understands a literal directly inside the call, which is the only form
-    /// the lookup can resolve anyway.
+    /// Pull the string out of every `t("…")` and `tf("…")` call. Deliberately
+    /// simple: it only understands a literal directly inside the call, which is
+    /// the only form the lookup can resolve anyway.
+    ///
+    /// **Both spellings, and that is the point.** Searching for `t("` cannot
+    /// find `tf("` — the substring is not in it — so every `tf` string was
+    /// exempt from the one check that exists to catch an untranslated string,
+    /// and one duly shipped that way.
     fn translated_literals(text: &str) -> Vec<String> {
         let mut found = Vec::new();
         let bytes = text.as_bytes();
-        let mut i = 0;
-        while let Some(pos) = text[i..].find("t(\"") {
-            let start = i + pos;
-            // Require a non-identifier character before `t`, so `format!(` and
-            // `insert(` do not match.
-            let ok = start == 0 || {
-                let c = bytes[start - 1] as char;
-                !c.is_alphanumeric() && c != '_'
-            };
-            let open = start + 3;
-            let Some(end_rel) = text[open..].find('"') else {
-                break;
-            };
-            if ok {
+        for (start, _) in text.match_indices('(') {
+            // Walk back over the callee. Stopping at the first non-identifier
+            // byte keeps `format!(` and `insert(` out, and it cannot split a
+            // character, because a non-ASCII byte ends the walk.
+            let mut name_start = start;
+            while name_start > 0 {
+                let c = bytes[name_start - 1] as char;
+                if c.is_ascii_alphanumeric() || c == '_' {
+                    name_start -= 1;
+                } else {
+                    break;
+                }
+            }
+            if !matches!(&text[name_start..start], "t" | "tf") {
+                continue;
+            }
+            // Skip whitespace after the paren. rustfmt puts a long literal on
+            // its own line, so a scanner that stops at the newline exempts
+            // precisely the strings most in need of a translation.
+            let mut open = start + 1;
+            while bytes.get(open).is_some_and(|b| b.is_ascii_whitespace()) {
+                open += 1;
+            }
+            if bytes.get(open) != Some(&b'"') {
+                continue;
+            }
+            open += 1;
+            if let Some(end_rel) = text[open..].find('"') {
                 found.push(text[open..open + end_rel].to_string());
             }
-            i = open + end_rel + 1;
         }
         found
     }

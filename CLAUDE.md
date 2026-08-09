@@ -63,6 +63,10 @@ src/
     native.rs         └─ tray-icon on a winit loop                 (Win/macOS)
   daemon.rs         tray-only background mode                      (all platforms)
   ipc.rs            single instance: unix socket, or a named pipe  (all platforms)
+  hotkey/
+    mod.rs          hotkey text, the bindable actions, candidates   (all platforms)
+    macos.rs          └─ Carbon registration, and Apple's own       (macOS only)
+  notify.rs         one line from a process with no window                (all platforms)
   wallpaper.rs      current desktop wallpaper, per platform
   settings/
     mod.rs          config paths, presets, load/save
@@ -74,7 +78,8 @@ src/
     mod.rs          the Preferences window: `shotr --settings`
     permission.rs     └─ the screen recording grant                (macOS only)
     sections.rs     general, export and redaction policy
-    about.rs        shortcuts and version, read-only
+    shortcuts.rs      └─ binding capture hotkeys                    (macOS only)
+    about.rs        version, and the editor's fixed keys
   annotate.rs       annotation layers and their rasterisation
   export.rs         encoding and save dialogs
   history.rs        recent shots
@@ -287,6 +292,51 @@ off in `theme::apply` so egui does not rescale the whole UI on ctrl+plus.
 include `~/.local/bin`, so a bare `Exec=shotr` resolves in a terminal and fails
 silently from the launcher.
 
+**Registering a global hotkey tells you nothing about whether it was free.**
+`register` returns `Ok` for a combination another application already holds —
+measured against `⌘⇧5` while macOS owned it and `⌘⇧4` while Shottr did. And when
+two receivers hold one combination, **both fire**: one press, two actions, no
+error anywhere. Apple's own shortcuts can be read from
+`com.apple.symbolichotkeys`; nothing can enumerate a third party's. That is why
+`hotkey` has no `is_available()`, and why the interface says "macOS is not using
+this" rather than "free" — the difference is not pedantry, because on the
+machine this was measured on `⌘⇧4` read as disabled in the plist while Shottr
+held it. One more: a press delivers `Pressed` *and* `Released`, so a handler
+that does not filter captures twice.
+
+**A capture that opens no window has to say so.** `--capture --copy` renders to
+the clipboard and exits, which looks exactly like a hotkey that never fired —
+and was diagnosed as one, twice, before the notification existed. `main::notify`
+is not decoration: it is the only evidence the path produces, and without it the
+feature cannot be told apart from a broken binding.
+
+**Register global hotkeys before the winit loop starts, not from inside it.**
+The status item is the opposite way round — macOS refuses one until
+NSApplication is up, which is why `tray/native.rs` builds it in `resumed` — and
+copying that habit for hotkeys is what broke them: created on the first tick
+inside `about_to_wait`, every `register` returned `Ok` and no event ever
+arrived. Moving the manager to `daemon::run`, before `tray::run` takes the main
+thread, is what made presses land. Two orderings, two behaviours, no error
+message in either — the only way to tell them apart is to press a key and watch.
+
+Note the debugging trap underneath: a synthesised keystroke does not do it.
+`osascript … keystroke` produced nothing even once the code was right, so a
+press has to be a real one.
+
+**Carbon hotkeys need no Accessibility grant, unlike an event tap.** Measured
+from an `.app` with `AXIsProcessTrusted() = false`: the key still fired and no
+prompt appeared. Screen recording remains the only permission macOS asks shotr
+for. Measure this sort of thing from a bundle, never from a terminal — a bare
+binary inherits the responsible process's grant and reports whatever the
+terminal already had.
+
+**That plist mixes two encodings.** In `com.apple.symbolichotkeys` the keycode
+is a Carbon virtual code but the modifier mask is `NSEvent.ModifierFlags`
+(shift `1<<17` … command `1<<20`). Third-party preferences use Carbon's own
+constants instead — Shottr stores `⌘⇧` as `768`, where the plist stores
+`1179648`. Reading one with the other's table yields a plausible wrong answer
+rather than an error.
+
 ## Conventions
 
 **Comments explain why, never what.** The code says what it does. A comment
@@ -358,6 +408,7 @@ GPLv2 direction — is a licensing decision, not a routine `cargo add`.
 | Window list in tray | yes | yes | no — the overlay lists them |
 | Tray daemon | ksni (SNI over D-Bus) | tray-icon on winit | tray-icon on winit |
 | Single instance | unix socket | named pipe | unix socket |
+| Capture hotkey | the desktop binds `shotr --capture` | the desktop binds it | shotr binds it, in Preferences |
 | Screen recording grant | — | — | TCC, per bundle |
 | OCR (Vietnamese) | tesseract | tesseract if installed | tesseract if installed |
 

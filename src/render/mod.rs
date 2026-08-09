@@ -105,6 +105,30 @@ pub fn render(scene: &Scene) -> RgbaImage {
     render_detailed(scene).image
 }
 
+/// Render at full size with every resource the style asks for, loaded fresh.
+///
+/// This is what a one-shot render needs — `shotr --capture --copy` opens no
+/// window, so no editor is holding a decoded wallpaper, a system font and a
+/// watermark logo. Reaching for [`Scene::plain`] instead looks equivalent and is
+/// not: it leaves all three `None`, so a style with a wallpaper background or a
+/// lettered watermark would copy differently from the way it exports.
+pub fn beautify(shot: &RgbaImage, style: &Style) -> RgbaImage {
+    let open = |p: &std::path::PathBuf| image::open(p).ok().map(|i| i.to_rgba8());
+    let bg_image = style.background_image_path().as_ref().and_then(open);
+    let logo = style.watermark_image.as_ref().and_then(open);
+    let font = text::load_system_font().map(|(_, font)| font);
+
+    render(&Scene {
+        shot,
+        style,
+        scale: 1.0,
+        bg_image: bg_image.as_ref(),
+        font: font.as_ref(),
+        layers: &[],
+        logo: logo.as_ref(),
+    })
+}
+
 pub fn render_detailed(scene: &Scene) -> Rendered {
     let s = scene.style;
     let scale = scene.scale.max(0.01);
@@ -282,6 +306,33 @@ fn layout(sw: u32, sh: u32, pad: u32, inset: u32, ratio: Ratio, scale: f32) -> (
 mod tests {
     use super::*;
     use crate::annotate::{Layer, Tool};
+
+    /// `Scene::plain` leaves the font `None`, and a lettered watermark drawn
+    /// with no font draws nothing. If `beautify` ever produces what `plain`
+    /// does, `--copy` has quietly stopped putting the watermark on an image the
+    /// editor would have lettered.
+    #[test]
+    fn beautify_loads_the_font_a_lettered_watermark_needs() {
+        // A machine carrying none of the candidate fonts cannot show a
+        // difference either way, and this suite may not fetch one.
+        if text::load_system_font().is_none() {
+            return;
+        }
+
+        let shot = RgbaImage::from_pixel(80, 60, Rgba([90, 120, 200, 255]));
+        let style = Style {
+            watermark: true,
+            watermark_text: "shotr".to_owned(),
+            ..Style::default()
+        };
+
+        assert_ne!(
+            beautify(&shot, &style).into_raw(),
+            render(&Scene::plain(&shot, &style, 1.0)).into_raw(),
+            "the watermark font was never loaded, so a copy loses lettering the \
+             editor draws for the same style"
+        );
+    }
 
     #[test]
     fn auto_just_adds_padding_and_frame() {

@@ -280,6 +280,10 @@ pub struct ShotrApp {
     /// Opened from the tray with no capture behind it, so the Select screen is
     /// a hub rather than a region picker.
     pub(crate) hub: bool,
+    /// `--copy` where the picker is shotr's own window. macOS never sets this:
+    /// Apple's overlay hands back a finished region, so that copy happens
+    /// before any window exists.
+    pub copy_on_finish: bool,
     /// Background colour detected in the current screenshot, for the Inset UI.
     pub(crate) detected_inset: Option<Rgba8>,
     pub(crate) show_custom_size: bool,
@@ -376,6 +380,7 @@ impl ShotrApp {
             clipboard: arboard::Clipboard::new().ok(),
             picking_fullscreen: matches!(start, Start::Picker(_)),
             hub: matches!(start, Start::History),
+            copy_on_finish: false,
             detected_inset: None,
             show_custom_size: false,
             text_caret: 0,
@@ -704,15 +709,7 @@ impl ShotrApp {
 
     /// Load the wallpaper or custom image if the current background needs one.
     fn sync_bg_image(&mut self) {
-        let wanted: Option<PathBuf> = match self.style.background {
-            Background::Desktop => crate::wallpaper::current(),
-            Background::Custom
-                if self.style.custom_bg.kind == crate::settings::CustomKind::Image =>
-            {
-                self.style.custom_bg.image.clone()
-            }
-            _ => None,
-        };
+        let wanted = self.style.background_image_path();
         if wanted == self.bg_image_key {
             return;
         }
@@ -889,6 +886,15 @@ impl ShotrApp {
 impl eframe::App for ShotrApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+
+        // The selection has just been made in shotr's own picker, and `--copy`
+        // asked for the clipboard rather than the editor. Leaving before the
+        // editor paints is the whole point: the window never becomes visible.
+        if self.copy_on_finish && self.mode == Mode::Edit {
+            self.copy_on_finish = false;
+            self.copy_and_close(&ctx);
+            return;
+        }
 
         if let Some(t) = self.pending_capture {
             ctx.request_repaint();

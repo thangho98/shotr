@@ -16,6 +16,11 @@ use eframe::egui;
 use shotr::app::{ShotrApp, Source, Start};
 use shotr::capture;
 use shotr::daemon;
+use shotr::export;
+use shotr::i18n::t;
+use shotr::notify;
+use shotr::render;
+use shotr::settings::{Prefs, Style};
 use shotr::winlist;
 
 const HELP: &str = "\
@@ -26,6 +31,8 @@ shotr — chụp và làm đẹp ảnh màn hình
     shotr --capture --full   Chụp hết, vào thẳng trình sửa
     shotr --capture --monitor N   Mở sẵn ở màn hình thứ N (đếm từ 0)
     shotr --capture --window ID   Chụp một cửa sổ, vào thẳng trình sửa
+    shotr --capture --copy        Chụp vùng, làm đẹp, copy luôn — không mở cửa sổ
+    shotr --capture --full --copy Chụp hết, làm đẹp, copy luôn
     shotr --open [FILE]  Mở một ảnh có sẵn
     shotr --clipboard    Mở ảnh đang có trong clipboard
     shotr --history      Mở danh sách ảnh chụp gần đây
@@ -39,8 +46,12 @@ một app tự ẩn cửa sổ của mình.
 Trong trình sửa: Ctrl+lăn chuột để phóng to/thu nhỏ, giữ chuột giữa để kéo ảnh,
 Ctrl+0 vừa khung, Ctrl+1 về 100%.
 
-Phím tắt toàn cục: COSMIC Settings → Keyboard → Shortcuts → Custom,
-chạy `shotr --capture`.
+Phím tắt toàn cục:
+  macOS  — Preferences → Shortcuts, chọn tổ hợp ngay trong app.
+           Muốn dùng ⌘⇧4 thì phải tắt phím của Apple trong System Settings →
+           Keyboard → Keyboard Shortcuts → Screenshots trước.
+  Khác   — để desktop lo: COSMIC Settings → Keyboard → Shortcuts → Custom,
+           chạy `shotr --capture`.
 ";
 
 /// The value after `flag`, if there is one.
@@ -51,6 +62,30 @@ fn arg_after<'a>(args: &'a [String], flag: &str) -> Option<&'a String> {
 /// `--monitor N`, if given and a number.
 fn monitor_arg(args: &[String]) -> Option<usize> {
     arg_after(args, "--monitor").and_then(|v| v.parse().ok())
+}
+
+/// `--copy` only means something alongside `--capture`. On its own there is
+/// nothing to copy, and accepting it would exit having silently done nothing.
+fn copy_flag(args: &[String]) -> Result<bool, ()> {
+    let has = |flag: &str| args.iter().any(|a| a == flag);
+    match (has("--copy"), has("--capture")) {
+        (true, false) => Err(()),
+        (copy, _) => Ok(copy),
+    }
+}
+
+/// Render with the saved style and hand it to the clipboard. No window is
+/// created, no eframe context is built.
+fn copy_beautified(shot: &image::RgbaImage) {
+    let out = render::beautify(shot, &Style::load());
+    let mut clipboard = arboard::Clipboard::new().ok();
+    match export::copy(&out, &mut clipboard) {
+        Ok(()) => notify::show(t("Copied to the clipboard")),
+        Err(e) => {
+            eprintln!("Could not reach the clipboard: {e}");
+            notify::show(t("Cannot reach the clipboard"));
+        }
+    }
 }
 
 /// One window, straight to the editor. `None` means nothing to show — the user
@@ -150,6 +185,17 @@ fn main() -> eframe::Result {
         return shotr::prefs_ui::run();
     }
 
+    // Before the daemon branch below, because `--copy` names no window and
+    // would otherwise fall through it and start the tray — the silent nothing
+    // that `Command::args` has its own test to prevent.
+    let copy = match copy_flag(&args) {
+        Ok(copy) => copy,
+        Err(()) => {
+            eprintln!("--copy needs --capture: on its own there is nothing to copy.");
+            return Ok(());
+        }
+    };
+
     // Plain `shotr` is the tray daemon. On Linux it has to be: a Wayland client
     // cannot hide its own window, so the only way to stay out of its own
     // screenshot is for no window to exist when the shutter fires. Windows and
@@ -194,6 +240,32 @@ fn main() -> eframe::Result {
         }
     };
 
+    // `--copy` skips the editor, which it can only do once the image is final.
+    // Every source hands one back already except shotr's own region picker,
+    // where the selection has not been made yet — there the copy waits for it.
+    //
+    // Redaction boxes come from OCR, and OCR is something only the editor runs.
+    // With that policy on, a windowless copy would hand back an unredacted
+    // image to the one user who asked for it not to be, so the editor opens.
+    let mut copy_on_finish = false;
+    if copy {
+        // The notification is the only thing this path says out loud, so it has
+        // to speak the language the rest of the app does.
+        let prefs = Prefs::load();
+        shotr::i18n::set(prefs.lang);
+        if prefs.redact {
+            eprintln!(
+                "Redaction is on, so this opens the editor instead: a windowless \
+                 copy would not have run text recognition."
+            );
+        } else if let Start::Editor(shot) | Start::Window(shot) = &start {
+            copy_beautified(shot);
+            return Ok(());
+        } else {
+            copy_on_finish = true;
+        }
+    }
+
     // The region picker covers the screen and shows the shot at 1:1, so it
     // looks like you are selecting on the live desktop. macOS never reaches
     // here: Apple's overlay did the picking before this process opened anything.
@@ -216,13 +288,17 @@ fn main() -> eframe::Result {
             viewport,
             ..Default::default()
         },
-        Box::new(|cc| Ok(Box::new(ShotrApp::new(cc, start, source, views.clone())))),
+        Box::new(move |cc| {
+            let mut app = ShotrApp::new(cc, start, source, views.clone());
+            app.copy_on_finish = copy_on_finish;
+            Ok(Box::new(app))
+        }),
     )
 }
 
 #[cfg(test)]
 mod arg_tests {
-    use super::{arg_after, monitor_arg};
+    use super::{arg_after, copy_flag, monitor_arg};
 
     fn args(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| s.to_string()).collect()
@@ -251,6 +327,34 @@ mod arg_tests {
         let a = args(&["--capture", "--full"]);
         assert_eq!(arg_after(&a, "--window"), None);
         assert_eq!(monitor_arg(&a), None, "no --monitor means every monitor");
+    }
+
+    #[test]
+    fn copy_needs_something_to_copy() {
+        assert_eq!(
+            copy_flag(&args(&["--copy"])),
+            Err(()),
+            "`--copy` alone would exit having silently done nothing"
+        );
+        assert_eq!(
+            copy_flag(&args(&["--open", "--copy"])),
+            Err(()),
+            "`--copy` is about a capture, not about a file already on disk"
+        );
+    }
+
+    #[test]
+    fn copy_rides_along_with_a_capture() {
+        assert_eq!(copy_flag(&args(&["--capture", "--copy"])), Ok(true));
+        assert_eq!(
+            copy_flag(&args(&["--capture", "--full", "--copy"])),
+            Ok(true)
+        );
+        assert_eq!(
+            copy_flag(&args(&["--capture", "--full"])),
+            Ok(false),
+            "a capture without --copy must still open the editor"
+        );
     }
 
     #[test]

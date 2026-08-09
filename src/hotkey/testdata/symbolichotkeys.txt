@@ -1,0 +1,81 @@
+{
+    10 =     {
+        enabled = 1;
+        value =         {
+            parameters =             (
+                65535,
+                96,
+                8650752
+            );
+            type = standard;
+        };
+    };
+    28 =     {
+        enabled = 0;
+        value =         {
+            parameters =             (
+                51,
+                20,
+                1179648
+            );
+            type = standard;
+        };
+    };
+    29 =     {
+        enabled = 0;
+        value =         {
+            parameters =             (
+                51,
+                20,
+                1441792
+            );
+            type = standard;
+        };
+    };
+    30 =     {
+        enabled = 1;
+        value =         {
+            parameters =             (
+                52,
+                21,
+                1179648
+            );
+            type = standard;
+        };
+    };
+    31 =     {
+        enabled = 0;
+        value =         {
+            parameters =             (
+                52,
+                21,
+                1441792
+            );
+            type = standard;
+        };
+    };
+    184 =     {
+        enabled = 1;
+        value =         {
+            parameters =             (
+                53,
+                23,
+                1179648
+            );
+            type = standard;
+        };
+    };
+    999 =     {
+        enabled = 1;
+        value =         {
+            parameters =             (
+                65535,
+                65535
+            );
+            type = standard;
+        };
+    };
+    1000 =     {
+        enabled = 1;
+    };
+}

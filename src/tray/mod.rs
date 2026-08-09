@@ -48,6 +48,11 @@ pub enum Command {
     CaptureRegion,
     /// Every monitor at once, straight to the editor.
     CaptureFull,
+    /// A region, beautified with the saved style and put on the clipboard
+    /// without opening anything.
+    CaptureRegionCopy,
+    /// Every monitor at once, beautified and copied, no editor.
+    CaptureFullCopy,
     /// One monitor whole, straight to the editor.
     CaptureMonitor(usize),
     /// One window, straight to the editor. The identifier is empty on macOS,
@@ -69,6 +74,10 @@ impl Command {
         match self {
             Command::CaptureRegion => vec!["--capture".into()],
             Command::CaptureFull => vec!["--capture".into(), "--full".into()],
+            Command::CaptureRegionCopy => vec!["--capture".into(), "--copy".into()],
+            Command::CaptureFullCopy => {
+                vec!["--capture".into(), "--full".into(), "--copy".into()]
+            }
             Command::CaptureMonitor(i) => vec![
                 "--capture".into(),
                 "--full".into(),
@@ -99,6 +108,8 @@ mod tests {
         for command in [
             Command::CaptureRegion,
             Command::CaptureFull,
+            Command::CaptureRegionCopy,
+            Command::CaptureFullCopy,
             Command::CaptureMonitor(2),
             Command::CaptureWindow("42".into()),
             Command::OpenFile,

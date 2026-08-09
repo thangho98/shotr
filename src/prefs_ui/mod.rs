@@ -9,6 +9,7 @@ mod about;
 #[cfg(target_os = "macos")]
 mod permission;
 mod sections;
+mod shortcuts;
 
 use eframe::egui;
 
@@ -60,6 +61,7 @@ pub struct PrefsApp {
     saved: Prefs,
     section: Section,
     status: String,
+    shortcuts: shortcuts::State,
 }
 
 impl PrefsApp {
@@ -72,6 +74,7 @@ impl PrefsApp {
             prefs,
             section: Section::ALL[0],
             status: String::new(),
+            shortcuts: shortcuts::State::default(),
         }
     }
 }
@@ -104,7 +107,7 @@ impl eframe::App for PrefsApp {
                 Section::General => sections::general(ui, &mut self.prefs),
                 Section::Export => sections::export(ui, &mut self.prefs),
                 Section::Redaction => sections::redaction(ui, &mut self.prefs),
-                Section::Shortcuts => about::shortcuts(ui),
+                Section::Shortcuts => shortcuts::ui(ui, &mut self.prefs, &mut self.shortcuts),
                 Section::About => about::version(ui),
             });
 

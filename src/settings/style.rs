@@ -148,6 +148,22 @@ impl Style {
     pub fn save(&self) {
         super::write_json("style.json", self);
     }
+
+    /// The image this background needs, if it needs one.
+    ///
+    /// Two callers have to agree on this: the editor, which caches the decoded
+    /// image across frames, and the one-shot `--copy` render, which has nothing
+    /// to cache. Answering it in two places is how the copy quietly stops
+    /// matching what the editor produces for the same style.
+    pub fn background_image_path(&self) -> Option<PathBuf> {
+        match self.background {
+            Background::Desktop => crate::wallpaper::current(),
+            Background::Custom if self.custom_bg.kind == CustomKind::Image => {
+                self.custom_bg.image.clone()
+            }
+            _ => None,
+        }
+    }
 }
 
 #[cfg(test)]

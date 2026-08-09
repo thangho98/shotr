@@ -78,6 +78,21 @@ pub struct Prefs {
     /// Off by default: the phone pattern is the loosest of the set and the
     /// most likely to cover something that is not a phone number.
     pub redact_phone: bool,
+
+    /// Global capture hotkeys, as canonical text — `"Cmd+Shift+4"`.
+    ///
+    /// Text rather than the hotkey crate's types because this file is read and
+    /// edited by people, and a dependency bump must not be able to invalidate
+    /// what they wrote. Empty on every platform that leaves the binding to the
+    /// desktop, which is all of them but macOS.
+    pub hotkeys: Vec<(crate::hotkey::Action, String)>,
+
+    /// Whether the one-off starting hotkey has been offered yet.
+    ///
+    /// Separate from `hotkeys` being empty, because those are not the same
+    /// thing: someone who cleared every binding on purpose meant it, and must
+    /// not find one back after the next restart.
+    pub hotkeys_initialised: bool,
 }
 
 impl Default for Prefs {
@@ -95,6 +110,8 @@ impl Default for Prefs {
             redact_ip: true,
             redact_key: true,
             redact_phone: false,
+            hotkeys: Vec::new(),
+            hotkeys_initialised: false,
         }
     }
 }
@@ -141,6 +158,30 @@ mod tests {
         assert_eq!(p.jpeg_quality, 10);
         assert_eq!(p.format, Prefs::default().format);
         assert_eq!(p.filename_template, Prefs::default().filename_template);
+        assert!(
+            p.hotkeys.is_empty(),
+            "a settings file written before hotkeys existed must still open"
+        );
+    }
+
+    /// A binding read back under a different name than it was written is a
+    /// hotkey that silently stops working after an upgrade.
+    #[test]
+    fn hotkeys_round_trip_through_json() {
+        use crate::hotkey::Action;
+        let p = Prefs {
+            hotkeys: vec![
+                (Action::Region, "Cmd+Shift+4".to_owned()),
+                (Action::FullCopy, "Cmd+Ctrl+Shift+3".to_owned()),
+            ],
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&p).unwrap();
+        assert_eq!(serde_json::from_str::<Prefs>(&json).unwrap(), p);
+        assert!(
+            json.contains("region"),
+            "an action should read as a name in the file people edit, got {json}"
+        );
     }
 
     /// A directory that has gone away must not take exporting down with it.

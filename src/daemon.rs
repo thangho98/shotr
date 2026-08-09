@@ -12,7 +12,10 @@
 
 use std::process::Command as Process;
 
+use crate::hotkey::Hotkeys;
+use crate::i18n::tf;
 use crate::ipc;
+use crate::settings::Prefs;
 use crate::tray::{self, Command};
 
 /// Run until the tray asks us to quit. Returns the process exit code.
@@ -32,8 +35,37 @@ pub fn run() -> i32 {
     // asking for two shots means two shots — so only this one is tracked.
     let mut prefs_window: Option<std::process::Child> = None;
 
-    // Two sources, one loop: the tray menu, and later `shotr` launches. Which
-    // loop it is differs by platform — see `tray::run`.
+    // Before `tray::run`, not on its first tick. The status item is the other
+    // way round — macOS refuses one until NSApplication is up — but a Carbon
+    // hotkey wants the opposite: registered from the main thread *before* the
+    // event loop takes it over. Both orderings were measured; see
+    // `plans/reports/260809-1151-macos-global-hotkeys.md`.
+    let mut prefs = Prefs::load();
+
+    // A fresh install gets one working shortcut rather than a Preferences pane
+    // it has to find first — and is told which, because macOS cannot say whether
+    // the combination was already spoken for.
+    let system = crate::hotkey::system_bindings();
+    if let Some((action, hotkey)) = crate::hotkey::first_run_binding(&prefs, &system) {
+        prefs.hotkeys.push((action, hotkey.to_string()));
+        prefs.hotkeys_initialised = true;
+        prefs.save();
+        crate::notify::show(&tf(
+            "{keys} now captures a region. Change it in Preferences.",
+            &[("keys", &hotkey.to_string())],
+        ));
+    } else if !prefs.hotkeys_initialised {
+        // Nothing was free, or this platform leaves it to the desktop. Either
+        // way the question is settled and must not be asked again.
+        prefs.hotkeys_initialised = true;
+        prefs.save();
+    }
+
+    let mut hotkeys = Hotkeys::new();
+    hotkeys.rebind(&prefs.hotkeys);
+
+    // Three sources, one loop: the tray menu, later `shotr` launches, and the
+    // global hotkeys. Which loop it is differs by platform — see `tray::run`.
     tray::run(move |command| {
         match command {
             Some(Command::Quit) => return false,
@@ -53,10 +85,19 @@ pub fn run() -> i32 {
                 spawn_shot(&command.args());
             }
             None => {
+                // A hotkey and a menu click become the same command line here,
+                // so everything downstream — the fresh process, the poke at an
+                // editor already up — is the path the tray has always used.
+                for action in hotkeys.pressed() {
+                    spawn_shot(&action.command().args());
+                }
                 if let Ok(request) = requests.try_recv() {
                     match request {
                         ipc::Request::Capture | ipc::Request::Show => {
                             spawn_shot(&Command::CaptureRegion.args());
+                        }
+                        ipc::Request::ReloadHotkeys => {
+                            hotkeys.rebind(&Prefs::load().hotkeys);
                         }
                     }
                 }

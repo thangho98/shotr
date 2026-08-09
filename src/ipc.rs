@@ -35,6 +35,12 @@ pub enum Request {
     Show,
     /// `shotr --capture`, i.e. the desktop shortcut.
     Capture,
+    /// Preferences changed a binding.
+    ///
+    /// It runs in its own process, so the daemon holding the registrations
+    /// cannot see the edit. Without this the window would show a hotkey the
+    /// daemon has never heard of until the next restart.
+    ReloadHotkeys,
 }
 
 impl Request {
@@ -42,6 +48,7 @@ impl Request {
         match self {
             Request::Show => "show",
             Request::Capture => "capture",
+            Request::ReloadHotkeys => "reload-hotkeys",
         }
     }
 
@@ -49,6 +56,7 @@ impl Request {
         match s.trim() {
             "show" => Some(Request::Show),
             "capture" => Some(Request::Capture),
+            "reload-hotkeys" => Some(Request::ReloadHotkeys),
             _ => None,
         }
     }
@@ -89,13 +97,25 @@ unsafe fn libc_getuid() -> u32 {
     unsafe { getuid() }
 }
 
+/// Hand a request to a running instance. `false` means nobody was listening.
+///
+/// Fire and forget, and a miss is not an error: with no daemon up there is
+/// nothing holding hotkeys to reload.
+#[cfg(unix)]
+pub fn poke(request: Request) -> bool {
+    let Ok(mut stream) = UnixStream::connect(socket_path()) else {
+        return false;
+    };
+    let _ = stream.write_all(request.wire().as_bytes());
+    true
+}
+
 /// Claim the socket, or hand `request` to whoever already has it.
 #[cfg(unix)]
 pub fn start(request: Request) -> Instance {
     let path = socket_path();
 
-    if let Ok(mut stream) = UnixStream::connect(&path) {
-        let _ = stream.write_all(request.wire().as_bytes());
+    if poke(request) {
         return Instance::Secondary;
     }
 
@@ -278,10 +298,9 @@ mod windows_pipe {
         s.encode_utf16().chain(std::iter::once(0)).collect()
     }
 
-    pub(super) fn start(request: Request) -> Instance {
+    /// Hand a request to a running instance. `false` means nobody was listening.
+    pub(super) fn poke(request: Request) -> bool {
         let name = wide(&pipe_name(std::env::var("USERNAME").ok().as_deref()));
-
-        // Someone already listening? Hand the request over and step aside.
         let client = unsafe {
             CreateFileW(
                 name.as_ptr(),
@@ -293,19 +312,29 @@ mod windows_pipe {
                 null_mut(),
             )
         };
-        if usable(client) {
-            let bytes = request.wire().as_bytes();
-            let mut written = 0u32;
-            unsafe {
-                WriteFile(
-                    client,
-                    bytes.as_ptr(),
-                    bytes.len() as u32,
-                    &mut written,
-                    null_mut(),
-                );
-                CloseHandle(client);
-            }
+        if !usable(client) {
+            return false;
+        }
+        let bytes = request.wire().as_bytes();
+        let mut written = 0u32;
+        unsafe {
+            WriteFile(
+                client,
+                bytes.as_ptr(),
+                bytes.len() as u32,
+                &mut written,
+                null_mut(),
+            );
+            CloseHandle(client);
+        }
+        true
+    }
+
+    pub(super) fn start(request: Request) -> Instance {
+        let name = wide(&pipe_name(std::env::var("USERNAME").ok().as_deref()));
+
+        // Someone already listening? Hand the request over and step aside.
+        if poke(request) {
             return Instance::Secondary;
         }
 
@@ -364,13 +393,19 @@ pub fn start(request: Request) -> Instance {
     windows_pipe::start(request)
 }
 
+/// Hand a request to a running instance. `false` means nobody was listening.
+#[cfg(windows)]
+pub fn poke(request: Request) -> bool {
+    windows_pipe::poke(request)
+}
+
 #[cfg(test)]
 mod wire_tests {
     use super::*;
 
     #[test]
     fn requests_round_trip_through_the_wire_format() {
-        for req in [Request::Show, Request::Capture] {
+        for req in [Request::Show, Request::Capture, Request::ReloadHotkeys] {
             assert_eq!(Request::parse(req.wire()), Some(req));
         }
         assert_eq!(Request::parse("capture\n"), Some(Request::Capture));

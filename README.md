@@ -71,16 +71,35 @@ shotr --capture             capture, then drag out a region
 shotr --capture --full      capture everything, straight to the editor
 shotr --capture --monitor N one monitor, straight to the editor
 shotr --capture --window ID one window, straight to the editor
+shotr --capture --copy      beautify and copy, without opening a window
 shotr --open [FILE]         open an existing image
 shotr --clipboard           open whatever image is on the clipboard
 shotr --history             recent shots, and the other ways in
 shotr --settings            the Preferences window
 ```
 
-Wayland gives no application a global key grab, so the shortcut has to come from
-the desktop. On COSMIC: Settings → Keyboard → Shortcuts → Custom, with the
-command `shotr --capture`. Running that while shotr is already in the tray pokes
-the process that is up rather than starting a second one — on every platform.
+### Keyboard shortcuts
+
+**On macOS** a fresh install claims one combination for capturing a region —
+`⌘⇧4` where that is free, the nearest neighbour where it is not — and says which
+in a notification. Everything else is opt-in.
+
+Preferences → Shortcuts is where the rest live: a combination per action, either
+the one offered or one you press yourself. macOS keeps its own screenshot
+shortcuts for itself, so to use `⌘⇧4` you first switch Apple's off in System
+Settings → Keyboard → Keyboard Shortcuts → Screenshots. Come back and shotr
+notices.
+
+macOS will not report whether *another application* holds a combination, and if
+one does, both run. If a press does two things, choose different keys.
+
+**On Linux and Windows** the desktop does this better than shotr could, so it is
+left there — and on Wayland no application gets a global key grab anyway. On
+COSMIC: Settings → Keyboard → Shortcuts → Custom, with the command
+`shotr --capture`.
+
+Either way, running `shotr --capture` while shotr is already in the tray pokes
+the process that is up rather than starting a second one.
 
 ### Editor controls
 
@@ -122,7 +141,9 @@ click, or pick words by hand.
 the image, with size, opacity and rotation.
 
 **Export** — PNG, JPEG, WebP. Copy to the clipboard, save, or save under a
-filename template.
+filename template. `--copy` does the whole thing without a window: capture,
+apply the saved style, clipboard, done — with a notification, because otherwise
+there is no way to tell it happened.
 
 ## Vietnamese text recognition
 

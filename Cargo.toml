@@ -42,12 +42,15 @@ wayland-protocols = { version = "0.32", features = ["client", "staging"] }
 tray-icon = { version = "0.24.2", default-features = false }
 winit = "0.30.13"
 
-# macOS-only: one class, `NSRunningApplication`, to bring a window's application
-# forward before photographing it. Not a new dependency in practice — xcap
-# already builds this exact version for its own AppKit calls, and cargo unions
-# the features — but `winlist` uses it directly, so it is declared directly.
-# MIT, which the GPL can absorb.
+# macOS-only: global capture hotkeys. Linux does not need this — COSMIC and
+# GNOME already bind a command to a key, and this crate's Linux path is X11 only
+# regardless. Windows could use it, but nothing calls it there yet.
+#
+# Carbon's `RegisterEventHotKey` underneath, which needs no Accessibility grant:
+# measured, see `plans/reports/260809-1151-macos-global-hotkeys.md`. MIT or
+# Apache-2.0, and Apache-2.0 combines into GPL-3.0 in the direction this needs.
 [target.'cfg(target_os = "macos")'.dependencies]
+global-hotkey = "0.8.0"
 
 [profile.release]
 # The OCR stack (rten) drags in a lot of symbols; stripping roughly halves the
