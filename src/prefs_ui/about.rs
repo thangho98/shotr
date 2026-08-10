@@ -24,6 +24,7 @@ const KEYS: &[(&str, &str)] = &[
     ("`", "Back to the Select tool"),
     ("Esc", "Back to the Select tool, or cancel"),
     ("{mod} + C", "Copy the finished image and close"),
+    ("{mod} + Shift + C", "Copy the shot as captured"),
     ("{mod} + S", "Save the finished image"),
     ("{mod} + Z", "Undo, and Shift to redo"),
     ("{mod} + wheel", "Zoom in and out"),

@@ -885,6 +885,30 @@ impl ShotrApp {
         }
     }
 
+    /// The screenshot as it was taken: no background, no frame, no watermark,
+    /// nothing drawn on it.
+    ///
+    /// Not `full_render` with the style turned off — that would still lay the
+    /// shot out on a canvas. The pixels are the capture's own, which is the
+    /// whole point: this is the image to paste somewhere that does its own
+    /// framing.
+    ///
+    /// Redactions are the exception and stay. See [`Self::redaction_layers`].
+    /// It does not close the window either, unlike Copy: this is something you
+    /// reach for beside the finished image, not instead of it.
+    pub(crate) fn copy_as_captured(&mut self) {
+        let boxes = self.redaction_layers();
+        let mut out = self.shot_full.clone();
+        if !boxes.is_empty() {
+            crate::annotate::apply(&mut out, &boxes, 1.0, self.font.as_ref());
+        }
+        match export::copy(&out, &mut self.clipboard) {
+            Ok(()) if boxes.is_empty() => self.status = t("Copied the shot as captured").into(),
+            Ok(()) => self.status = t("Copied the shot as captured, still redacted").into(),
+            Err(e) => self.status = format!("Clipboard lỗi: {e}"),
+        }
+    }
+
     pub(crate) fn do_save(&mut self, path: Option<PathBuf>) {
         let path = path.unwrap_or_else(|| export::default_path(&self.prefs));
         let out = self.full_render();
@@ -1113,14 +1137,57 @@ pub(crate) const MOD_LABEL: &str = if cfg!(target_os = "macos") {
     "Ctrl"
 };
 
-/// True if the frame asked for a copy, however the platform spelled it.
+/// Which of the two copies a frame asked for.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum CopyWhat {
+    /// The finished image, and close — `{mod}+C`.
+    Finished,
+    /// The screenshot on its own — `{mod}+Shift+C`.
+    AsCaptured,
+}
+
+/// What the frame's copy chord asked for, however the platform spelled it.
 ///
 /// egui translates the system's copy chord into [`egui::Event::Copy`] and, on
 /// macOS, that is *all* it delivers: ⌘C arrives with no key press at all, only a
 /// release once the chord is over. Watching for the key alone therefore left ⌘C
 /// — the combination every Mac user reaches for first — doing nothing.
-fn copy_requested(events: &[egui::Event]) -> bool {
-    shortcut(events, egui::Key::C, None) || events.iter().any(|e| matches!(e, egui::Event::Copy))
+///
+/// The shift variant costs more than it looks. `egui_winit::is_copy_command`
+/// tests `command && C` and **never looks at shift**, then returns before the
+/// press is pushed — so `{mod}+Shift+C` is swallowed into the very same
+/// `Event::Copy`, on every platform, and the two chords are one event carrying
+/// no modifiers. `frame_shift` is what is left to tell them apart. It is the
+/// end-of-frame state, normally the wrong thing to read (see [`shortcut`]), and
+/// it is good enough only here: shift in a three-key chord is held down across
+/// many frames, where the modifier in a quick `{mod}+C` tap is not.
+///
+/// A press that does reach us — physical Ctrl on a Mac, where `command` is ⌘ —
+/// carries its own modifiers, and those are exact, so it is preferred.
+fn copy_requested(events: &[egui::Event], frame_shift: bool) -> Option<CopyWhat> {
+    let which = |shift: bool| {
+        Some(if shift {
+            CopyWhat::AsCaptured
+        } else {
+            CopyWhat::Finished
+        })
+    };
+    for e in events {
+        if let egui::Event::Key {
+            key: egui::Key::C,
+            pressed: true,
+            modifiers,
+            ..
+        } = e
+            && editor_modifier(modifiers)
+        {
+            return which(modifiers.shift);
+        }
+    }
+    if events.iter().any(|e| matches!(e, egui::Event::Copy)) {
+        return which(frame_shift);
+    }
+    None
 }
 
 /// True if `key` went down this frame with the editor's modifier held, and with
@@ -1201,7 +1268,7 @@ impl ShotrApp {
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
         let (copy, save, space, undo, redo, delete) = ctx.input(|i| {
             (
-                copy_requested(&i.events),
+                copy_requested(&i.events, i.modifiers.shift),
                 shortcut(&i.events, egui::Key::S, None),
                 i.key_pressed(egui::Key::Space),
                 shortcut(&i.events, egui::Key::Z, Some(false)),
@@ -1241,8 +1308,16 @@ impl ShotrApp {
                 // to say: closing here is what lets the paste happen in the
                 // window the user was already working in. Typing a label is the
                 // exception — there Ctrl+C belongs to the text field.
-                if copy && !self.typing_text() {
-                    self.copy_and_close(ctx);
+                //
+                // Shift asks for the capture instead, and does *not* close: it
+                // is a side-grab, taken beside the finished image rather than
+                // instead of it.
+                if !self.typing_text() {
+                    match copy {
+                        Some(CopyWhat::Finished) => self.copy_and_close(ctx),
+                        Some(CopyWhat::AsCaptured) => self.copy_as_captured(),
+                        None => {}
+                    }
                 }
                 if save {
                     self.do_save(None);
@@ -1498,17 +1573,56 @@ mod shortcut_tests {
     /// no key press at all — so watching for the key alone missed it entirely.
     #[test]
     fn the_platform_copy_event_counts_as_the_shortcut() {
-        assert!(
-            super::copy_requested(&[Event::Copy]),
+        assert_eq!(
+            super::copy_requested(&[Event::Copy], false),
+            Some(super::CopyWhat::Finished),
             "Cmd+C did nothing on macOS, where it arrives as no key press at all"
         );
     }
 
     #[test]
     fn an_ordinary_frame_asks_for_no_copy() {
-        assert!(
-            !super::copy_requested(&[press(Key::S, CTRL)]),
+        assert_eq!(
+            super::copy_requested(&[press(Key::S, CTRL)], false),
+            None,
             "Ctrl+S copied and closed the editor"
+        );
+    }
+
+    /// The two copies are one event. `egui_winit::is_copy_command` matches
+    /// `command && C` without looking at shift and swallows the press, so
+    /// `{mod}+Shift+C` arrives as the same bare `Event::Copy` as `{mod}+C` —
+    /// and the frame's shift state is the only thing left that separates them.
+    /// Get this wrong and asking for the plain shot closes the editor with the
+    /// beautified one on the clipboard instead.
+    #[test]
+    fn shift_asks_for_the_capture_rather_than_the_finished_image() {
+        assert_eq!(
+            super::copy_requested(&[Event::Copy], true),
+            Some(super::CopyWhat::AsCaptured),
+            "Cmd+Shift+C copied the finished image and closed the window"
+        );
+        assert_eq!(
+            super::copy_requested(&[Event::Copy], false),
+            Some(super::CopyWhat::Finished),
+            "a plain Cmd+C stopped copying the finished image"
+        );
+    }
+
+    /// A press that does reach us carries exact modifiers, and they win over
+    /// the frame's end state — which is stale by the time it is read.
+    #[test]
+    fn a_real_key_press_is_believed_over_the_frame() {
+        let shifted = Modifiers { shift: true, ..CTRL };
+        assert_eq!(
+            super::copy_requested(&[press(Key::C, shifted)], false),
+            Some(super::CopyWhat::AsCaptured),
+            "Ctrl+Shift+C was read as a plain copy because the frame had let shift go"
+        );
+        assert_eq!(
+            super::copy_requested(&[press(Key::C, CTRL)], true),
+            Some(super::CopyWhat::Finished),
+            "a plain Ctrl+C was read as the shifted one from stale frame state"
         );
     }
 

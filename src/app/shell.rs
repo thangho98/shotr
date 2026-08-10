@@ -464,6 +464,18 @@ impl ShotrApp {
                 self.open_output_dir();
                 ui.close();
             }
+            // Printed with its keys, the way the top bar prints Copy's and
+            // Save's: a menu is where a shortcut is found, and this one has no
+            // button of its own to carry it.
+            let plain = format!(
+                "{}  {}+Shift+C",
+                t("Copy the shot as captured"),
+                super::MOD_LABEL
+            );
+            if ui.button(plain).clicked() {
+                self.copy_as_captured();
+                ui.close();
+            }
             if ui.button(t("Copy the text in the image")).clicked() {
                 self.copy_text(false);
                 ui.close();

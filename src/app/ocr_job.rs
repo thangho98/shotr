@@ -161,6 +161,19 @@ impl ShotrApp {
     /// otherwise the move shows a ghost sitting still behind the one that is
     /// following the mouse. The export never skips anything.
     pub(crate) fn layers_except(&self, skip: Option<usize>) -> Vec<Layer> {
+        let mut out = self.redaction_layers();
+        out.extend(annotations_except(&self.layers, skip));
+        out
+    }
+
+    /// What the redaction policy and the user's own picks cover, with nothing
+    /// drawn on top.
+    ///
+    /// Separate because these are the one thing that survives "copy the shot as
+    /// captured": they exist to keep something off a screen, so an image that
+    /// drops them is the one image the person who turned redaction on asked not
+    /// to have. The same rule already keeps `--copy` out of the windowless path.
+    pub(crate) fn redaction_layers(&self) -> Vec<Layer> {
         let mut out = Vec::new();
 
         if self.prefs.redact {
@@ -177,8 +190,6 @@ impl ShotrApp {
                 out.push(self.redaction_layer(pad_rect(word.rect)));
             }
         }
-
-        out.extend(annotations_except(&self.layers, skip));
         out
     }
 

@@ -417,6 +417,24 @@ measured by logging every event the editor received. Window shortcuts only; the
 global capture hotkeys are spelled out in full (`Cmd+Shift+4`) and mean exactly
 what they say.
 
+That swallowing is wider than it looks: `egui_winit::is_copy_command` matches
+`command && C` and **never looks at shift**, then returns before pushing the
+press. So `{mod}+Shift+C` — "copy the shot as captured" — arrives as the very
+same bare `Event::Copy` as `{mod}+C`, on every platform, carrying no modifiers
+to tell them apart. `copy_requested` therefore falls back to the frame's own
+shift state, which is the end-of-frame value this file warns about everywhere
+else. It is sound only because shift in a deliberate three-key chord is held
+across many frames, where the modifier in a quick `{mod}+C` tap is not; a real
+key press, when one reaches us at all, is believed over it.
+
+Which makes this the one shortcut a synthetic keystroke cannot test.
+`osascript … keystroke "c" using {command down, shift down}` posts the whole
+chord faster than egui runs a frame, so shift is already up by the time the
+frame is read and the press takes the *unshifted* branch — measured: it copied
+the beautified image and closed the window. Post the modifiers as separate
+CGEvents and hold them for a few hundred milliseconds, the way a hand does, and
+it takes the right one. A failure here means the test harness, not the code.
+
 Accepting both keys is not licence to *name* both. Every label used to read
 `Ctrl+…` on all three platforms, which on a Mac points at the key that is not
 under the reader's thumb — reported as the Copy and Save buttons being wrong.

@@ -681,6 +681,35 @@ mod tests {
         l
     }
 
+    /// "Copy the shot as captured" hands over the capture's own pixels with the
+    /// redaction boxes baked straight into them. That only works because baking
+    /// leaves the image exactly as it was everywhere the box does not reach —
+    /// unlike `render`, which deliberately lays the shot out on a larger canvas.
+    #[test]
+    fn baking_a_redaction_box_leaves_the_rest_of_the_capture_alone() {
+        let before = RgbaImage::from_pixel(200, 200, Rgba([9, 200, 9, 255]));
+        let mut shot = before.clone();
+        let mut cover = Layer::new(Tool::Fill, [40.0, 40.0], [0, 0, 0, 255], 1.0, 12.0, 1.0);
+        cover.b = [100.0, 80.0];
+        apply(&mut shot, &[cover], 1.0, None);
+
+        assert_eq!(
+            shot.dimensions(),
+            before.dimensions(),
+            "the copy has to be the screenshot, not a canvas it was laid out on"
+        );
+        assert_ne!(
+            shot.get_pixel(70, 60),
+            before.get_pixel(70, 60),
+            "the redaction box covered nothing, so the copy leaks what it hides"
+        );
+        assert_eq!(
+            shot.get_pixel(180, 180),
+            before.get_pixel(180, 180),
+            "baking a box repainted the rest of the shot"
+        );
+    }
+
     /// Turning a shape has to move ink, and it has to move it *about the
     /// centre* — a rotation that also slid the shape sideways would be a
     /// translation wearing a disguise.
