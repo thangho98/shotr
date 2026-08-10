@@ -22,13 +22,13 @@ const REPO: &str = "https://github.com/thangho98/shotr";
 const KEYS: &[(&str, &str)] = &[
     ("1 – 7", "Pick a tool"),
     ("Esc", "Back to the Select tool, or cancel"),
-    ("Ctrl + C", "Copy the finished image and close"),
-    ("Ctrl + S", "Save the finished image"),
-    ("Ctrl + Z", "Undo, and Shift to redo"),
-    ("Ctrl + wheel", "Zoom in and out"),
+    ("{mod} + C", "Copy the finished image and close"),
+    ("{mod} + S", "Save the finished image"),
+    ("{mod} + Z", "Undo, and Shift to redo"),
+    ("{mod} + wheel", "Zoom in and out"),
     ("Middle drag", "Pan the image"),
-    ("Ctrl + 0", "Fit to the window"),
-    ("Ctrl + 1", "Back to 100%"),
+    ("{mod} + 0", "Fit to the window"),
+    ("{mod} + 1", "Back to 100%"),
     ("Space", "Switch between region and window picking"),
     ("Enter", "Take the whole screen"),
 ];
@@ -46,9 +46,13 @@ pub fn editor_keys(ui: &mut egui::Ui) {
     ui.add_space(10.0);
     for (keys, what) in KEYS {
         ui.horizontal(|ui| {
+            // `{mod}` is filled in per platform: both Ctrl and Cmd work
+            // everywhere, but the label has to name the one that is actually
+            // under the reader's thumb.
+            let keys = keys.replace("{mod}", crate::app::MOD_LABEL);
             ui.add_sized(
                 egui::vec2(120.0, 18.0),
-                egui::Label::new(egui::RichText::new(*keys).monospace()),
+                egui::Label::new(egui::RichText::new(keys).monospace()),
             );
             ui.label(t(what));
         });
@@ -85,6 +89,24 @@ fn open_url(url: &str) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    /// The placeholder has to be substituted, or the About list reads
+    /// "{mod} + C" at the user.
+    #[test]
+    fn no_row_reaches_the_screen_still_holding_the_placeholder() {
+        let mut substituted = 0;
+        for (keys, _) in super::KEYS {
+            let shown = keys.replace("{mod}", crate::app::MOD_LABEL);
+            assert!(!shown.contains('{'), "{keys} still has a placeholder in it");
+            if keys.contains("{mod}") {
+                substituted += 1;
+            }
+        }
+        assert!(
+            substituted >= 5,
+            "only {substituted} rows name the modifier; the list has stopped using it"
+        );
+    }
+
     /// A shortcut with no description, or the other way round, would render as a
     /// blank row.
     #[test]

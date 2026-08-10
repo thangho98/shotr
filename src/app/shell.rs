@@ -399,12 +399,18 @@ impl ShotrApp {
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             self.more_menu(ui);
-            if ui.button(format!("{}  Ctrl+S", t("Save"))).clicked() {
+            if ui
+                .button(format!("{}  {}+S", t("Save"), super::MOD_LABEL))
+                .clicked()
+            {
                 self.do_save(None);
             }
             // Labelled with the shortcut, so it has to do what the shortcut
             // does — copy and leave.
-            if ui.button(format!("{}  Ctrl+C", t("Copy"))).clicked() {
+            if ui
+                .button(format!("{}  {}+C", t("Copy"), super::MOD_LABEL))
+                .clicked()
+            {
                 self.copy_and_close(ctx);
             }
             separator(ui);

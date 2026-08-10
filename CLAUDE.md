@@ -374,15 +374,20 @@ it looked like a signing or install fault for an afternoon.
 
 **Ctrl and ⌘ reach the editor by two different routes, and it needs both.**
 `Modifiers::command` is ⌘ on macOS and Ctrl elsewhere, so matching it alone left
-the physical Ctrl key — the one every label in the app names, "Copy  Ctrl+C" in
-the bottom bar and "Ctrl + 0" in `prefs_ui::about`, on all three platforms —
-doing nothing on a Mac. And ⌘C does not arrive as a key press *at all*: egui
+the physical Ctrl key doing nothing on a Mac. And ⌘C does not arrive as a key press *at all*: egui
 turns the platform copy chord into `Event::Copy` and delivers only that, plus a
 release once the chord is over. Hence `editor_modifier` accepting either
 modifier, and `copy_requested` also watching for `Event::Copy`. Both were
 measured by logging every event the editor received. Window shortcuts only; the
 global capture hotkeys are spelled out in full (`Cmd+Shift+4`) and mean exactly
 what they say.
+
+Accepting both keys is not licence to *name* both. Every label used to read
+`Ctrl+…` on all three platforms, which on a Mac points at the key that is not
+under the reader's thumb — reported as the Copy and Save buttons being wrong.
+`app::MOD_LABEL` is the one place that decides, and `prefs_ui::about` fills a
+`{mod}` placeholder from it. Spelled "Cmd", not "⌘": the same word `hotkey`
+already writes into prefs.json, and no glyph to go missing from a system font.
 
 **Desktop entries need absolute paths.** The graphical session's `PATH` does not
 include `~/.local/bin`, so a bare `Exec=shotr` resolves in a terminal and fails

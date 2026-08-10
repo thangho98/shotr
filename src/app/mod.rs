@@ -1070,6 +1070,19 @@ fn editor_modifier(m: &egui::Modifiers) -> bool {
     m.command || m.ctrl
 }
 
+/// What to *call* that modifier in a label, on the platform reading it.
+///
+/// Both keys work everywhere — see [`editor_modifier`] — but only one of them
+/// is the one a person on this platform reaches for, and printing "Ctrl+C" on a
+/// Mac tells them to use the key that is not under their thumb. Spelled "Cmd"
+/// rather than "⌘": the same word [`crate::hotkey`] already writes into
+/// prefs.json, and no glyph to go missing from a system font.
+pub(crate) const MOD_LABEL: &str = if cfg!(target_os = "macos") {
+    "Cmd"
+} else {
+    "Ctrl"
+};
+
 /// True if the frame asked for a copy, however the platform spelled it.
 ///
 /// egui translates the system's copy chord into [`egui::Event::Copy`] and, on
@@ -1346,6 +1359,23 @@ mod shortcut_modifier_tests {
             ..Default::default()
         };
         assert!(editor_modifier(&cmd), "Cmd+C stopped copying");
+    }
+
+    /// A label has to name the key the reader will actually press. Both work,
+    /// but "Ctrl+C" on a Mac points at the key that is not under their thumb —
+    /// reported as the Copy and Save buttons being wrong.
+    #[test]
+    fn the_label_names_this_platforms_modifier() {
+        let want = if cfg!(target_os = "macos") {
+            "Cmd"
+        } else {
+            "Ctrl"
+        };
+        assert_eq!(
+            super::MOD_LABEL,
+            want,
+            "the buttons would tell a user to press the wrong key"
+        );
     }
 
     /// Otherwise a bare C, typed into anything, would fire every shortcut.
