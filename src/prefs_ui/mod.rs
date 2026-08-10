@@ -4,11 +4,17 @@
 //! It reads and writes [`crate::settings::Prefs`] only — the look of a shot is
 //! [`crate::settings::Style`], and that stays in the editor's sidebar where the
 //! image it applies to is visible.
+//!
+//! It draws its own window, for the same reason the editor does: a card that
+//! overhangs the frame cannot be built out of a system-decorated rectangle. See
+//! [`shell`].
 
 mod about;
+mod icons;
 #[cfg(target_os = "macos")]
 mod permission;
 mod sections;
+mod shell;
 mod shortcuts;
 
 use eframe::egui;
@@ -17,7 +23,7 @@ use crate::app::theme;
 use crate::i18n::t;
 use crate::settings::Prefs;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum Section {
     #[cfg(target_os = "macos")]
     Permission,
@@ -41,6 +47,19 @@ impl Section {
         Section::About,
     ];
 
+    /// What the window opens on.
+    ///
+    /// Permission leads the list, but almost nobody comes here for it — so it
+    /// only takes the opening slot while the grant it exists to fix is missing,
+    /// which is the one visit that has nothing to do with settings.
+    fn opening() -> Section {
+        #[cfg(target_os = "macos")]
+        if !permission::granted() {
+            return Section::Permission;
+        }
+        Section::General
+    }
+
     fn label(self) -> &'static str {
         match self {
             #[cfg(target_os = "macos")]
@@ -62,6 +81,12 @@ pub struct PrefsApp {
     section: Section,
     status: String,
     shortcuts: shortcuts::State,
+    /// The nav card's gradient. Dropped when the palette changes, because the
+    /// texture holds the old one.
+    card_grad: Option<egui::TextureHandle>,
+    /// Mirrored rather than read from the viewport each time — see
+    /// [`shell`], and the same trap the editor documents.
+    maximised: bool,
 }
 
 impl PrefsApp {
@@ -72,9 +97,24 @@ impl PrefsApp {
         Self {
             saved: prefs.clone(),
             prefs,
-            section: Section::ALL[0],
+            section: Section::opening(),
             status: String::new(),
             shortcuts: shortcuts::State::default(),
+            card_grad: None,
+            maximised: false,
+        }
+    }
+
+    /// Whatever the chosen section puts in the content pane.
+    fn section_ui(&mut self, ui: &mut egui::Ui) {
+        match self.section {
+            #[cfg(target_os = "macos")]
+            Section::Permission => permission::ui(ui, &mut self.status),
+            Section::General => sections::general(ui, &mut self.prefs),
+            Section::Export => sections::export(ui, &mut self.prefs),
+            Section::Redaction => sections::redaction(ui, &mut self.prefs),
+            Section::Shortcuts => shortcuts::ui(ui, &mut self.prefs, &mut self.shortcuts),
+            Section::About => about::version(ui),
         }
     }
 }
@@ -84,49 +124,22 @@ impl eframe::App for PrefsApp {
         // Following the desktop means following it while the window is open.
         theme::sync(ui.ctx());
 
-        egui::Panel::left("sections")
-            .exact_size(180.0)
-            .resizable(false)
-            .show_inside(ui, |ui| {
-                ui.add_space(12.0);
-                for section in Section::ALL {
-                    if ui
-                        .selectable_label(self.section == *section, section.label())
-                        .clicked()
-                    {
-                        self.section = *section;
-                        self.status.clear();
-                    }
-                }
-            });
-
-        egui::CentralPanel::default().show_inside(ui, |ui| {
-            ui.add_space(8.0);
-            theme::section(ui, self.section.label());
-            ui.add_space(8.0);
-            egui::ScrollArea::vertical().show(ui, |ui| match self.section {
-                #[cfg(target_os = "macos")]
-                Section::Permission => permission::ui(ui, &mut self.status),
-                Section::General => sections::general(ui, &mut self.prefs),
-                Section::Export => sections::export(ui, &mut self.prefs),
-                Section::Redaction => sections::redaction(ui, &mut self.prefs),
-                Section::Shortcuts => shortcuts::ui(ui, &mut self.prefs, &mut self.shortcuts),
-                Section::About => about::version(ui),
-            });
-
-            if !self.status.is_empty() {
-                ui.add_space(10.0);
-                ui.label(egui::RichText::new(&self.status).weak().small());
-            }
-        });
+        self.shell_ui(ui);
 
         if self.prefs != self.saved {
             if self.prefs.theme != self.saved.theme {
                 theme::set_mode(ui.ctx(), self.prefs.theme);
+                self.card_grad = None;
             }
             self.prefs.save();
             self.saved = self.prefs.clone();
         }
+    }
+
+    /// Transparent, so the frame this window draws for itself can have rounded
+    /// corners and the card can hang off its left edge.
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        [0.0, 0.0, 0.0, 0.0]
     }
 }
 
@@ -136,9 +149,14 @@ pub fn run() -> eframe::Result {
     // a Vietnamese window.
     crate::i18n::set(Prefs::load().lang);
 
+    // The design's 780×540 frame, plus the transparent strip the card hangs
+    // into. Decorations off and transparency on for the same reason as the
+    // editor — and transparency can only be asked for at creation.
     let viewport = egui::ViewportBuilder::default()
-        .with_inner_size([720.0, 560.0])
-        .with_min_inner_size([620.0, 460.0])
+        .with_decorations(false)
+        .with_transparent(true)
+        .with_inner_size([780.0 + shell::MARGIN_LEFT, 540.0])
+        .with_min_inner_size([620.0 + shell::MARGIN_LEFT, 440.0])
         .with_title(t("shotr — Preferences"))
         .with_icon(crate::app::window_icon());
     eframe::run_native(
@@ -149,4 +167,25 @@ pub fn run() -> eframe::Result {
         },
         Box::new(|cc| Ok(Box::new(PrefsApp::new(cc)))),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Section;
+
+    /// Every section has to be reachable from the nav, or a whole pane of
+    /// settings exists with no way to open it.
+    #[test]
+    fn every_section_is_in_the_nav_and_named() {
+        for section in Section::ALL {
+            assert!(
+                !section.label().trim().is_empty(),
+                "a nav entry would draw as a blank row"
+            );
+        }
+        assert!(
+            Section::ALL.contains(&Section::opening()),
+            "the window opens on a section the nav does not list"
+        );
+    }
 }

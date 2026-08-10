@@ -7,7 +7,7 @@ use crate::i18n::{t, tf};
 mod canvas;
 pub(crate) mod icons;
 mod ocr_job;
-mod shell;
+pub(crate) mod shell;
 mod sidebar;
 pub(crate) mod theme;
 

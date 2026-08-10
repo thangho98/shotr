@@ -129,6 +129,7 @@ static VI: &[(&str, &str)] = &[
     ("Capture every screen", "Chụp mọi màn hình"),
     ("Card", "Thẻ"),
     ("Card numbers", "Số thẻ"),
+    ("Changes are saved as you make them", "Mọi thay đổi được lưu ngay"),
     ("Changes with the desktop, while shotr is running.", "Đổi theo hệ thống, ngay khi shotr đang chạy."),
     ("Change…", "Đổi…"),
     ("Choose a folder…", "Chọn thư mục…"),

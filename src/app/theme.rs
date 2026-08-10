@@ -250,21 +250,40 @@ pub(crate) fn window_frame(painter: &egui::Painter, rect: egui::Rect) {
     painter.rect_stroke(rect, radius, hairline(), egui::StrokeKind::Inside);
 }
 
-/// Paint the sidebar card.
+/// A wash of ink over whatever is beneath, for the states a raised card gives
+/// its own contents: a nav row that is hovered, or selected.
+///
+/// It flips direction with the theme for the same reason [`Palette::edge`] does
+/// — white at low alpha lifts a dark surface and does absolutely nothing to a
+/// light one.
+pub(crate) fn wash(alpha: u8) -> Color32 {
+    if pal().dark {
+        Color32::from_white_alpha(alpha)
+    } else {
+        Color32::from_black_alpha(alpha)
+    }
+}
+
+/// Paint a card that stands proud of the window frame.
 ///
 /// The card and the frame are the same family of greys, so what separates them
 /// is the hairline and the gradient, not a shadow: the card overhangs onto the
 /// user's desktop, and a shadow there is read as a border — see [`CARD_SHADOW`].
 ///
-/// `gradient` is a 1×N texture of [`SIDEBAR_TOP`] → [`SIDEBAR_BOTTOM`]. A mesh
-/// would not do: egui cannot clip a mesh to rounded corners, and the corners are
-/// the whole point of the card.
-pub(crate) fn sidebar_card(
+/// `gradient` is a 1×N texture of [`Palette::sidebar_top`] →
+/// [`Palette::sidebar_bottom`]. A mesh would not do: egui cannot clip a mesh to
+/// rounded corners, and the corners are the whole point of the card.
+///
+/// The radius is the caller's, not a constant here: the editor's sidebar and the
+/// Preferences nav are the same object at two sizes, and the smaller one wants a
+/// smaller corner.
+pub(crate) fn card_surface(
     painter: &egui::Painter,
     rect: egui::Rect,
+    radius: u8,
     gradient: Option<&egui::TextureHandle>,
 ) {
-    let radius = CornerRadius::same(SIDEBAR_RADIUS);
+    let radius = CornerRadius::same(radius);
     painter.add(CARD_SHADOW.as_shape(rect, radius));
     match gradient {
         Some(tex) => {
@@ -433,12 +452,18 @@ fn style_for(pal: &Palette) -> egui::Style {
     sp.slider_width = 132.0;
     sp.slider_rail_height = 4.0;
     sp.interact_size.y = 24.0;
-    sp.scroll.bar_width = 8.0;
-    // Two separate gaps: content to scrollbar, and scrollbar to the panel edge.
-    // Without them the sliders and swatch grid run straight into the bar.
-    sp.scroll.bar_inner_margin = 10.0;
-    sp.scroll.bar_outer_margin = 4.0;
-    sp.scroll.floating = false;
+    // From `solid()`, never from the default. `ScrollStyle::default()` is
+    // `floating()`, which sets `foreground_color: true` — so merely turning
+    // `floating` off keeps it, and the handle is painted in `fg_stroke.color`,
+    // the *text* ink. That is a near-white stripe down the edge of every panel,
+    // brighter than anything it sits beside, and nothing about the field name
+    // says so. `solid()` puts it back to `bg_fill`, one step off the panel.
+    sp.scroll = egui::style::ScrollStyle::solid();
+    sp.scroll.bar_width = SCROLL_BAR;
+    // The gap between the content and the bar. There is none on the far side:
+    // the bar lines up with the right edge of everything above it.
+    sp.scroll.bar_inner_margin = SCROLL_INNER;
+    sp.scroll.bar_outer_margin = SCROLL_OUTER;
 
     use egui::FontFamily::{Monospace, Proportional};
     use egui::{FontId, TextStyle};
@@ -582,6 +607,12 @@ pub const RADIUS_CONTROL: u8 = 8;
 pub const RADIUS_SMALL: u8 = 6;
 /// A card.
 pub const RADIUS_CARD: u8 = 9;
+
+/// The scrollbar. Thin, and one step off the panel rather than the text ink —
+/// it marks where you are in a list, it is not a thing to look at.
+pub const SCROLL_BAR: f32 = 6.0;
+pub const SCROLL_INNER: f32 = 8.0;
+pub const SCROLL_OUTER: f32 = 0.0;
 
 /// Full-width button.
 const H_PRIMARY: f32 = 30.0;

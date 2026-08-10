@@ -988,7 +988,7 @@ fn grid_cell_side(avail: f32, cols: usize, gap: f32, pad: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use super::grid_cell_side;
+    use super::{grid_cell_side, theme};
 
     /// The swatch grid is the widest thing in the sidebar. If it overflows it
     /// does not just clip itself — it widens the scroll area, so every row
@@ -1026,8 +1026,10 @@ mod tests {
     #[test]
     fn the_shipped_sidebar_width_fits_five_columns() {
         // The shipped card, minus its 12 px of padding on each side and
-        // everything the scrollbar reserves: bar width + inner gap + outer gap.
-        let avail = 336.0 - 24.0 - (8.0 + 10.0 + 4.0);
+        // everything the scrollbar reserves. Taken from the theme rather than
+        // spelled out, or retuning the bar silently invalidates this.
+        let bar = theme::SCROLL_BAR + theme::SCROLL_INNER + theme::SCROLL_OUTER;
+        let avail = 336.0 - 24.0 - bar;
         let side = grid_cell_side(avail, 5, 6.0, 7.0 * 2.0);
         assert!(side >= 30.0, "swatches would be too small to read: {side}");
         let used = (side + 14.0) * 5.0 + 6.0 * 4.0;

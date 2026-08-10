@@ -140,10 +140,18 @@ impl ShotrApp {
         if self.sidebar_grad.is_none() {
             self.sidebar_grad = Some(theme::sidebar_gradient(ctx));
         }
-        theme::sidebar_card(ui.painter(), shell.sidebar, self.sidebar_grad.as_ref());
+        theme::card_surface(
+            ui.painter(),
+            shell.sidebar,
+            theme::SIDEBAR_RADIUS,
+            self.sidebar_grad.as_ref(),
+        );
         self.sidebar_column(ui, shell);
 
-        self.resize_bands(ui, shell);
+        // The card overhangs the top and bottom left corners, so the horizontal
+        // bands start past it — its own top edge is where the window controls
+        // live, and a resize band there would swallow them.
+        resize_bands(ui, shell.window, shell.sidebar.max.x, true);
     }
 
     // ------------------------------------------------------------- the frame
@@ -180,84 +188,92 @@ impl ShotrApp {
         self.maximised = !self.maximised;
         ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(self.maximised));
     }
+}
 
-    /// The grab bands along the window edges.
-    ///
-    /// Placed last, so they are on top of everything and a drag near the edge
-    /// resizes rather than draws. They deliberately avoid the sidebar column on
-    /// the top and bottom edges: the card overhangs there, and its own top edge
-    /// is where the window controls live.
-    fn resize_bands(&self, ui: &mut egui::Ui, shell: Shell) {
-        use egui::ResizeDirection as D;
-        let (w, s) = (shell.window, shell.sidebar);
-        let inner_x = (s.max.x).min(w.max.x - RESIZE_CORNER);
+/// The grab bands along the window edges.
+///
+/// Placed last, so they are on top of everything and a drag near the edge
+/// resizes rather than draws.
+///
+/// `inner_x` is where the top and bottom bands start, and `west` whether the
+/// left edge gets one at all. Both windows that draw their own chrome have a
+/// card in the way of those edges, and the card wants the clicks: in the editor
+/// it overhangs the top and bottom left corners, and in Preferences it covers
+/// the left edge outright.
+pub(crate) fn resize_bands(ui: &mut egui::Ui, w: egui::Rect, inner_x: f32, west: bool) {
+    use egui::ResizeDirection as D;
+    let inner_x = inner_x.min(w.max.x - RESIZE_CORNER);
 
-        let bands: [(egui::Rect, D, egui::CursorIcon); 6] = [
-            (
-                egui::Rect::from_min_max(
-                    egui::pos2(w.min.x, w.min.y + RESIZE_CORNER),
-                    egui::pos2(w.min.x + RESIZE_BAND, w.max.y - RESIZE_CORNER),
+    let bands: [(egui::Rect, D, egui::CursorIcon); 6] = [
+        (
+            egui::Rect::from_min_max(
+                egui::pos2(w.min.x, w.min.y + RESIZE_CORNER),
+                egui::pos2(
+                    if west { w.min.x + RESIZE_BAND } else { w.min.x },
+                    w.max.y - RESIZE_CORNER,
                 ),
-                D::West,
-                egui::CursorIcon::ResizeWest,
             ),
-            (
-                egui::Rect::from_min_max(
-                    egui::pos2(w.max.x - RESIZE_BAND, w.min.y + RESIZE_CORNER),
-                    egui::pos2(w.max.x, w.max.y - RESIZE_CORNER),
-                ),
-                D::East,
-                egui::CursorIcon::ResizeEast,
+            D::West,
+            egui::CursorIcon::ResizeWest,
+        ),
+        (
+            egui::Rect::from_min_max(
+                egui::pos2(w.max.x - RESIZE_BAND, w.min.y + RESIZE_CORNER),
+                egui::pos2(w.max.x, w.max.y - RESIZE_CORNER),
             ),
-            (
-                egui::Rect::from_min_max(
-                    egui::pos2(inner_x, w.min.y),
-                    egui::pos2(w.max.x - RESIZE_CORNER, w.min.y + RESIZE_BAND),
-                ),
-                D::North,
-                egui::CursorIcon::ResizeNorth,
+            D::East,
+            egui::CursorIcon::ResizeEast,
+        ),
+        (
+            egui::Rect::from_min_max(
+                egui::pos2(inner_x, w.min.y),
+                egui::pos2(w.max.x - RESIZE_CORNER, w.min.y + RESIZE_BAND),
             ),
-            (
-                egui::Rect::from_min_max(
-                    egui::pos2(inner_x, w.max.y - RESIZE_BAND),
-                    egui::pos2(w.max.x - RESIZE_CORNER, w.max.y),
-                ),
-                D::South,
-                egui::CursorIcon::ResizeSouth,
+            D::North,
+            egui::CursorIcon::ResizeNorth,
+        ),
+        (
+            egui::Rect::from_min_max(
+                egui::pos2(inner_x, w.max.y - RESIZE_BAND),
+                egui::pos2(w.max.x - RESIZE_CORNER, w.max.y),
             ),
-            (
-                egui::Rect::from_min_max(
-                    egui::pos2(w.max.x - RESIZE_CORNER, w.max.y - RESIZE_CORNER),
-                    w.max,
-                ),
-                D::SouthEast,
-                egui::CursorIcon::ResizeSouthEast,
+            D::South,
+            egui::CursorIcon::ResizeSouth,
+        ),
+        (
+            egui::Rect::from_min_max(
+                egui::pos2(w.max.x - RESIZE_CORNER, w.max.y - RESIZE_CORNER),
+                w.max,
             ),
-            (
-                egui::Rect::from_min_max(
-                    egui::pos2(w.max.x - RESIZE_CORNER, w.min.y),
-                    egui::pos2(w.max.x, w.min.y + RESIZE_CORNER),
-                ),
-                D::NorthEast,
-                egui::CursorIcon::ResizeNorthEast,
+            D::SouthEast,
+            egui::CursorIcon::ResizeSouthEast,
+        ),
+        (
+            egui::Rect::from_min_max(
+                egui::pos2(w.max.x - RESIZE_CORNER, w.min.y),
+                egui::pos2(w.max.x, w.min.y + RESIZE_CORNER),
             ),
-        ];
+            D::NorthEast,
+            egui::CursorIcon::ResizeNorthEast,
+        ),
+    ];
 
-        for (i, (rect, dir, cursor)) in bands.into_iter().enumerate() {
-            if rect.width() <= 0.0 || rect.height() <= 0.0 {
-                continue;
-            }
-            let resp = ui.interact(rect, ui.id().with(("resize", i)), egui::Sense::drag());
-            if resp.hovered() || resp.dragged() {
-                ui.ctx().set_cursor_icon(cursor);
-            }
-            if resp.drag_started() {
-                ui.ctx()
-                    .send_viewport_cmd(egui::ViewportCommand::BeginResize(dir));
-            }
+    for (i, (rect, dir, cursor)) in bands.into_iter().enumerate() {
+        if rect.width() <= 0.0 || rect.height() <= 0.0 {
+            continue;
+        }
+        let resp = ui.interact(rect, ui.id().with(("resize", i)), egui::Sense::drag());
+        if resp.hovered() || resp.dragged() {
+            ui.ctx().set_cursor_icon(cursor);
+        }
+        if resp.drag_started() {
+            ui.ctx()
+                .send_viewport_cmd(egui::ViewportCommand::BeginResize(dir));
         }
     }
+}
 
+impl ShotrApp {
     // ----------------------------------------------------------- the sidebar
 
     fn sidebar_column(&mut self, ui: &mut egui::Ui, shell: Shell) {

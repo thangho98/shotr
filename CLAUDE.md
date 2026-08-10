@@ -76,6 +76,9 @@ src/
     watermark.rs      └─ watermark position and lettering
   prefs_ui/
     mod.rs          the Preferences window: `shotr --settings`
+    shell.rs          └─ its own window: frame, title bar, the nav card that
+                         hangs off the left edge, and the status bar
+    icons.rs          └─ the six nav glyphs, drawn rather than shipped
     permission.rs     └─ the screen recording grant                (macOS only)
     sections.rs     general, export and redaction policy
     shortcuts.rs      └─ binding capture hotkeys                    (macOS only)
@@ -124,6 +127,14 @@ The third setting is `clear_color`, and it is the one that is *not* uniform:
 transparent for the editor, `panel_fill` for the fullscreen picker. A
 transparent clear under the picker is a hole straight through to the desktop
 being selected on, anywhere the shot does not reach.
+
+Preferences pays the same three costs, in `prefs_ui/shell.rs`, and it is a
+*different* card: shorter than the body it sits beside and hanging off the
+frame's left edge, where the editor's is taller than the frame and merely
+overlaps it. The two are not one widget with a parameter. What they do share is
+`theme::card_surface` and `app::shell::resize_bands` — the second takes which
+edges to leave alone, because in both windows a card is sitting on one and wants
+the clicks. Preferences gives up west resizing entirely for that reason.
 
 **There is no z-order between egui panels, so the overhang cannot be panels.**
 A `SidePanel` cannot overlap a `CentralPanel`, and the whole design is a card
@@ -353,6 +364,24 @@ fault rather than a theme one, and on a Mac set to "Auto" it appears at sunrise
 and goes away at sunset. `theme::apply` therefore pins
 `ThemePreference::Dark` *before* it touches the style. shotr is dark on purpose
 — the shot is meant to be the only bright thing on screen.
+
+**`ScrollStyle::default()` is `floating()`, and half of it survives turning
+`floating` off.** In particular `foreground_color: true`, which paints the
+handle in `fg_stroke.color` — the *text* ink. So a solid scroll bar built by
+taking the default and setting `floating = false` came out as a near-white
+stripe down the edge of every panel, brighter than anything it sat beside, with
+nothing in the field name to say why. `theme::apply` starts from
+`ScrollStyle::solid()` instead, which puts the handle back on `bg_fill`, one
+step off the panel. The width and the two margins are `theme::SCROLL_*`, because
+the sidebar's swatch grid has to fit five columns into what is left and a test
+checks it against those constants rather than against copies of them.
+
+**A `ScrollArea` shrinks to its widest row, not to the pane.** `auto_shrink`
+defaults to true on both axes, so the bar tracks the content — and a section
+made of short rows put it 46px in from the edge, nowhere near the controls it
+lines up with everywhere else. Preferences passes `auto_shrink([false, false])`
+for exactly that reason. It reads as a scrollbar in the wrong place rather than
+as a layout setting, which is what makes it hard to find.
 
 **egui diverts ctrl+wheel.** With the zoom modifier held, `smooth_scroll_delta`
 is zero and the wheel arrives as `zoom_delta()`. `zoom_with_keyboard` is turned
