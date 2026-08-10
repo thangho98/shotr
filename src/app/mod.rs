@@ -7,6 +7,7 @@ use crate::i18n::{t, tf};
 mod canvas;
 pub(crate) mod icons;
 mod ocr_job;
+mod shell;
 mod sidebar;
 pub(crate) mod theme;
 
@@ -122,6 +123,19 @@ pub(crate) fn swatch_order() -> Vec<Swatch> {
     v.push(Swatch::None);
     v.push(Swatch::Custom);
     v
+}
+
+/// One group of sidebar controls. Exactly one is open at a time: six groups is
+/// more than any screen shows at once, and a column of open cards is a column
+/// nobody can find anything in.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Section {
+    Background,
+    Layout,
+    Ratio,
+    Ocr,
+    Watermark,
+    Export,
 }
 
 /// What clicking on the image does while OCR results are showing.
@@ -290,6 +304,15 @@ pub struct ShotrApp {
     /// Background colour detected in the current screenshot, for the Inset UI.
     pub(crate) detected_inset: Option<Rgba8>,
     pub(crate) show_custom_size: bool,
+    /// Which sidebar group is unfolded.
+    pub(crate) open_section: Option<Section>,
+    /// The 1×N ramp the sidebar card is painted with. Built once, on the first
+    /// frame that has a `Context` to build it in.
+    pub(crate) sidebar_grad: Option<egui::TextureHandle>,
+    /// Our own idea of whether the window is maximised. With the titlebar gone
+    /// this is the only thing the maximise button can toggle against — see
+    /// [`shell`].
+    pub(crate) maximised: bool,
 
     /// Caret position, as a byte index into the text draft being typed. Bytes
     /// rather than chars because that is what slicing a `String` needs, and
@@ -310,12 +333,13 @@ impl ShotrApp {
         source: Source,
         views: Vec<crate::capture::MonitorView>,
     ) -> Self {
-        let font = theme::apply(&cc.egui_ctx);
         let placeholder = RgbaImage::from_pixel(640, 360, Rgba([28, 30, 38, 255]));
         let style = Style::load();
         let prefs = Prefs::load();
-        // Before any string is drawn, so the first frame is already translated.
+        // Before any string is drawn, so the first frame is already translated,
+        // and before any colour is chosen, so it is already the right theme.
         crate::i18n::set(prefs.lang);
+        let font = theme::apply(&cc.egui_ctx, prefs.theme);
 
         let mut app = Self {
             capture_full: placeholder.clone(),
@@ -387,6 +411,9 @@ impl ShotrApp {
             copy_on_finish: false,
             detected_inset: None,
             show_custom_size: false,
+            open_section: Some(Section::Background),
+            sidebar_grad: None,
+            maximised: false,
             text_caret: 0,
             text_before: None,
             text_preedit: String::new(),
@@ -549,13 +576,16 @@ impl ShotrApp {
         }
         self.picking_fullscreen = false;
         ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
-        ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(true));
+        // The editor draws its own titlebar, so the system's stays off — see
+        // `shell`. Turning decorations back on here would put a second,
+        // duplicate titlebar above the sidebar card's own.
+        ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(false));
         // Where the picker is an always-on-top overlay rather than a fullscreen
         // window, the editor it becomes must stop hovering over everything.
         ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(
             egui::WindowLevel::Normal,
         ));
-        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(1280.0, 820.0)));
+        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(1320.0, 860.0)));
     }
 
     fn enter_edit(&mut self) {
@@ -932,6 +962,10 @@ impl eframe::App for ShotrApp {
             }
         }
 
+        // Under `ThemeMode::System` the answer changes when the desktop does,
+        // with no warning — so it is asked every frame rather than at startup.
+        theme::sync(&ctx);
+
         self.poll_ocr(&ctx);
         if self.want_ocr && self.mode == Mode::Edit {
             self.want_ocr = false;
@@ -946,17 +980,6 @@ impl eframe::App for ShotrApp {
         self.text_edit_input(&ctx);
         self.handle_shortcuts(&ctx);
 
-        if !self.picking_fullscreen {
-            egui::Panel::right("controls")
-                .resizable(false)
-                .exact_size(SIDEBAR_W)
-                .show_inside(ui, |ui| self.sidebar(ui));
-
-            egui::Panel::bottom("actions")
-                .resizable(false)
-                .show_inside(ui, |ui| self.bottom_bar(ui));
-        }
-
         if self.style != self.prev_style {
             if self.style.custom_bg != self.prev_style.custom_bg {
                 self.swatches_dirty = true;
@@ -968,6 +991,12 @@ impl eframe::App for ShotrApp {
         // Preferences repaint too: the redaction policy lives here and decides
         // what gets covered.
         if self.prefs != self.prev_prefs {
+            if self.prefs.theme != self.prev_prefs.theme {
+                theme::set_mode(&ctx, self.prefs.theme);
+                // The card is painted from a texture, and that texture is the
+                // old palette's gradient.
+                self.sidebar_grad = None;
+            }
             self.prev_prefs = self.prefs.clone();
             self.dirty = true;
             self.save_settings_at = Some(ctx.input(|i| i.time) + 1.0);
@@ -1001,16 +1030,33 @@ impl eframe::App for ShotrApp {
             }
         }
 
-        egui::CentralPanel::default()
-            .frame(theme::canvas_frame(self.picking_fullscreen))
-            .show_inside(ui, |ui| match self.mode {
-                Mode::Select => self.select_central(ui),
-                Mode::Edit => self.edit_central(ui, &ctx),
-            });
+        // The picker covers the screen and has no chrome at all; everything else
+        // is the editor window, which draws its own.
+        if self.picking_fullscreen {
+            egui::CentralPanel::default()
+                .frame(theme::canvas_frame(true))
+                .show_inside(ui, |ui| self.select_central(ui));
+        } else {
+            self.shell_ui(ui, &ctx);
+        }
 
         // Selecting a region is what turns the fullscreen picker into the editor.
         if self.picking_fullscreen && self.mode == Mode::Edit {
             self.leave_fullscreen(&ctx);
+        }
+    }
+
+    /// The editor window is transparent, so the frame it draws for itself can
+    /// have rounded corners and a shadow that composite against the desktop.
+    ///
+    /// The fullscreen picker is the exception: it covers the screen with the
+    /// shot, and anywhere the shot does not reach would otherwise be a hole
+    /// straight through to the desktop being selected on.
+    fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
+        if self.picking_fullscreen {
+            visuals.panel_fill.to_normalized_gamma_f32()
+        } else {
+            [0.0, 0.0, 0.0, 0.0]
         }
     }
 }
@@ -1057,7 +1103,57 @@ fn shortcut(events: &[egui::Event], key: egui::Key, shift: Option<bool>) -> bool
     })
 }
 
+/// True if `key` went down this frame with **no** modifier held.
+///
+/// Tool keys have to insist on that. `⌘1` is "back to 100%" and `⌘0` is "fit to
+/// the window"; a digit handler that ignored modifiers would change the tool as
+/// well, every time someone zoomed.
+fn plain_key(events: &[egui::Event], key: egui::Key) -> bool {
+    events.iter().any(|e| {
+        matches!(
+            e,
+            egui::Event::Key { key: k, pressed: true, modifiers, .. }
+                if *k == key && modifiers.is_none()
+        )
+    })
+}
+
+/// The key that types `digit`. The pill prints these on its buttons, so the two
+/// must agree; there is a test that walks the whole list.
+fn digit_key(digit: char) -> Option<egui::Key> {
+    Some(match digit {
+        '1' => egui::Key::Num1,
+        '2' => egui::Key::Num2,
+        '3' => egui::Key::Num3,
+        '4' => egui::Key::Num4,
+        '5' => egui::Key::Num5,
+        '6' => egui::Key::Num6,
+        '7' => egui::Key::Num7,
+        _ => return None,
+    })
+}
+
 impl ShotrApp {
+    /// `1`–`7` pick a tool and Esc goes back to Select.
+    ///
+    /// Only reached with the editor up and nothing being typed — the caller
+    /// guards both — because a bare digit is a character before it is a
+    /// shortcut, and a label being written must get it.
+    fn tool_keys(&mut self, ctx: &egui::Context) {
+        let (picked, escape) = ctx.input(|i| {
+            let picked = shell::TOOLS.iter().find(|(_, digit)| {
+                digit_key(*digit).is_some_and(|k| plain_key(&i.events, k))
+            });
+            (picked.map(|(tool, _)| *tool), plain_key(&i.events, egui::Key::Escape))
+        });
+        if let Some(tool) = picked {
+            self.tool = tool;
+        }
+        if escape {
+            self.tool = Tool::Select;
+        }
+    }
+
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
         let (copy, save, space, undo, redo, delete) = ctx.input(|i| {
             (
@@ -1093,6 +1189,7 @@ impl ShotrApp {
             if actual {
                 self.set_zoom(Zoom::Percent(100));
             }
+            self.tool_keys(ctx);
         }
         match self.mode {
             Mode::Edit => {
@@ -1351,6 +1448,35 @@ mod shortcut_tests {
         assert!(
             !super::copy_requested(&[press(Key::S, CTRL)]),
             "Ctrl+S copied and closed the editor"
+        );
+    }
+
+    /// The digit printed on a tool button is a promise that the key works. If
+    /// the two drift, the button says "3" and pressing 3 does nothing — a
+    /// failure that produces no error anywhere.
+    #[test]
+    fn every_digit_printed_on_the_pill_maps_to_a_real_key() {
+        for (tool, digit) in super::shell::TOOLS {
+            assert!(
+                super::digit_key(digit).is_some(),
+                "{tool:?} prints {digit:?} on its button but no key produces it"
+            );
+        }
+    }
+
+    /// A tool key has to be the bare digit. `⌘1` is "back to 100%" and `⌘0` is
+    /// "fit to the window", so a digit handler that tolerated modifiers would
+    /// change the tool every time someone zoomed.
+    #[test]
+    fn a_modified_digit_does_not_pick_a_tool() {
+        let key = super::digit_key('1').expect("1 is the Arrow tool's key");
+        assert!(
+            !super::plain_key(&[press(key, CTRL)], key),
+            "Ctrl+1 would switch tool while zooming back to 100%"
+        );
+        assert!(
+            super::plain_key(&[press(key, Modifiers::NONE)], key),
+            "a bare 1 stopped picking the Arrow tool"
         );
     }
 }

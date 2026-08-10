@@ -20,13 +20,17 @@ const REPO: &str = "https://github.com/thangho98/shotr";
 
 /// What the editor binds today, taken from the same key handling it uses.
 const KEYS: &[(&str, &str)] = &[
+    ("1 – 7", "Pick a tool"),
+    ("Esc", "Back to the Select tool, or cancel"),
+    ("Ctrl + C", "Copy the finished image and close"),
+    ("Ctrl + S", "Save the finished image"),
+    ("Ctrl + Z", "Undo, and Shift to redo"),
     ("Ctrl + wheel", "Zoom in and out"),
     ("Middle drag", "Pan the image"),
     ("Ctrl + 0", "Fit to the window"),
     ("Ctrl + 1", "Back to 100%"),
     ("Space", "Switch between region and window picking"),
     ("Enter", "Take the whole screen"),
-    ("Esc", "Cancel"),
 ];
 
 /// What the editor binds while an image is open. These stay fixed: they are

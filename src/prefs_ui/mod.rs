@@ -66,9 +66,9 @@ pub struct PrefsApp {
 
 impl PrefsApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        theme::apply(&cc.egui_ctx);
         // The language is already set: `run` needs it before this, for the title.
         let prefs = Prefs::load();
+        theme::apply(&cc.egui_ctx, prefs.theme);
         Self {
             saved: prefs.clone(),
             prefs,
@@ -81,6 +81,9 @@ impl PrefsApp {
 
 impl eframe::App for PrefsApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        // Following the desktop means following it while the window is open.
+        theme::sync(ui.ctx());
+
         egui::Panel::left("sections")
             .exact_size(180.0)
             .resizable(false)
@@ -118,6 +121,9 @@ impl eframe::App for PrefsApp {
         });
 
         if self.prefs != self.saved {
+            if self.prefs.theme != self.saved.theme {
+                theme::set_mode(ui.ctx(), self.prefs.theme);
+            }
             self.prefs.save();
             self.saved = self.prefs.clone();
         }

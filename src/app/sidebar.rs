@@ -1,4 +1,8 @@
-//! The right-hand control panel and the bottom action bar.
+//! What goes inside the sidebar card.
+//!
+//! The card itself — its shape, its overhang, the strip with the window
+//! controls — is [`super::shell`]'s job. This file starts underneath that
+//! strip and fills the rest of the column.
 
 use crate::i18n::{t, tf};
 
@@ -7,10 +11,9 @@ use image::{Rgba, RgbaImage};
 
 use super::ocr_job::OcrState;
 use super::{
-    Mode, OcrMode, PickMode, SWATCH_PX, ShotrApp, Swatch, Zoom, swatch_order, theme,
+    Mode, OcrMode, PickMode, SWATCH_PX, Section, ShotrApp, Swatch, swatch_order, theme,
     to_color_image,
 };
-use crate::annotate::Tool;
 use crate::export;
 use crate::ocr::detect::Secret;
 use crate::render::background::{BG_PRESETS, auto_preset, image_cover, linear, mesh};
@@ -21,17 +24,19 @@ use crate::wallpaper;
 
 impl ShotrApp {
     pub(super) fn sidebar(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(10.0);
-        ui.horizontal(|ui| {
-            ui.add_space(2.0);
-            ui.heading("shotr");
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button(t("Capture again")).clicked() {
-                    self.start_capture(self.source);
-                }
-            });
-        });
-        theme::rule(ui);
+        let width = ui.available_width();
+        if ui
+            .add(egui::Button::new(t("Capture again")).min_size(egui::vec2(width, 27.0)))
+            .clicked()
+        {
+            self.start_capture(self.source);
+        }
+
+        if self.mode == Mode::Edit {
+            ui.add_space(10.0);
+            self.preset_row(ui);
+        }
+        ui.add_space(8.0);
 
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
@@ -39,6 +44,21 @@ impl ShotrApp {
                 Mode::Select => self.select_sidebar(ui),
                 Mode::Edit => self.edit_sidebar(ui),
             });
+    }
+
+    /// One accordion group. The fold draws the heading and the rule; this holds
+    /// the rule that only one of them is open at a time.
+    fn section_fold(
+        &mut self,
+        ui: &mut egui::Ui,
+        which: Section,
+        title: &str,
+        body: impl FnOnce(&mut Self, &mut egui::Ui),
+    ) {
+        let open = self.open_section == Some(which);
+        if theme::fold(ui, title, open, |ui| body(self, ui)) {
+            self.open_section = if open { None } else { Some(which) };
+        }
     }
 
     // ----------------------------------------------------------------- select
@@ -189,34 +209,46 @@ impl ShotrApp {
     // ------------------------------------------------------------------- edit
 
     fn edit_sidebar(&mut self, ui: &mut egui::Ui) {
-        // Back to the windowed Select screen. On Linux and Windows that is the
-        // picker over the shot just taken; the tray carries History, "Open
-        // file…" and "From clipboard" on every platform now.
-        if ui.button(t("Back to selection")).clicked() {
-            self.mode = Mode::Select;
-            self.sel_start = None;
-            self.sel_rect = None;
-            self.crop_px = None;
-            self.status.clear();
+        self.section_fold(ui, Section::Background, t("Background"), |s, ui| {
+            s.background_grid(ui)
+        });
+        self.section_fold(ui, Section::Layout, t("Layout"), |s, ui| s.layout_section(ui));
+        self.section_fold(ui, Section::Ratio, t("Ratio / Size"), |s, ui| {
+            s.ratio_section(ui)
+        });
+        self.section_fold(ui, Section::Ocr, t("Text recognition (OCR)"), |s, ui| {
+            s.ocr_body(ui)
+        });
+        self.section_fold(ui, Section::Watermark, t("Watermark"), |s, ui| {
+            s.watermark_section(ui)
+        });
+        self.section_fold(ui, Section::Export, t("Export"), |s, ui| s.export_section(ui));
+
+        ui.add_space(12.0);
+        if ui.button(t("Reset to defaults")).clicked() {
+            self.style = Style::default();
         }
-        theme::rule(ui);
+        ui.add_space(16.0);
+    }
 
-        self.tool_section(ui);
-        theme::rule(ui);
-
-        self.preset_row(ui);
-        theme::rule(ui);
-
-        theme::card(ui, t("Layout"), |ui| {
+    fn layout_section(&mut self, ui: &mut egui::Ui) {
         let s = &mut self.style;
-        theme::slider_label(ui, "Padding", s.padding);
+        theme::slider_label(ui, t("Padding"), s.padding);
         ui.add(egui::Slider::new(&mut s.padding, 0..=400).show_value(false));
+        theme::slider_label(ui, t("Border radius"), s.radius);
+        ui.add(egui::Slider::new(&mut s.radius, 0..=120).show_value(false));
+        theme::slider_label(ui, t("Add a shadow"), s.shadow);
+        ui.add(egui::Slider::new(&mut s.shadow, 0..=100).show_value(false));
 
         ui.horizontal(|ui| {
-            ui.label("Inset");
+            ui.label(t("Inset"));
             if s.inset_auto_color {
                 match self.detected_inset {
-                    Some(_) => ui.label(egui::RichText::new(t("(background colour detected)")).weak().small()),
+                    Some(_) => ui.label(
+                        egui::RichText::new(t("(background colour detected)"))
+                            .weak()
+                            .small(),
+                    ),
                     None => ui.label(
                         egui::RichText::new(t("(no background colour found)"))
                             .weak()
@@ -244,22 +276,16 @@ impl ShotrApp {
                 s.inset_auto_color = true;
             }
         });
-        ui.checkbox(&mut s.balance, "Balance")
-            .on_hover_text("Trim uniform edges so the subject sits centred");
+        ui.checkbox(&mut s.balance, t("Balance"))
+            .on_hover_text(t("Trim uniform edges so the subject sits centred"));
+    }
 
-        theme::slider_label(ui, t("Border radius"), s.radius);
-        ui.add(egui::Slider::new(&mut s.radius, 0..=120).show_value(false));
-        theme::slider_label(ui, t("Add a shadow"), s.shadow);
-        ui.add(egui::Slider::new(&mut s.shadow, 0..=100).show_value(false));
-        });
-
-        theme::card(ui, t("Background"), |ui| self.background_grid(ui));
-
-        theme::card(ui, t("Ratio / Size"), |ui| {
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let is_custom = self.style.ratio
-                == Ratio::Size(self.style.custom_size.0, self.style.custom_size.1);
-            if ui.selectable_label(is_custom, "Custom…").clicked() {
+    fn ratio_section(&mut self, ui: &mut egui::Ui) {
+        self.ratio_chips(ui);
+        ui.horizontal(|ui| {
+            let is_custom =
+                self.style.ratio == Ratio::Size(self.style.custom_size.0, self.style.custom_size.1);
+            if ui.selectable_label(is_custom, t("Custom…")).clicked() {
                 self.show_custom_size = !self.show_custom_size;
                 if self.show_custom_size {
                     let (w, h) = self.style.custom_size;
@@ -267,7 +293,6 @@ impl ShotrApp {
                 }
             }
         });
-        self.ratio_chips(ui);
         if self.show_custom_size {
             ui.horizontal(|ui| {
                 let (mut w, mut h) = self.style.custom_size;
@@ -281,19 +306,6 @@ impl ShotrApp {
                 }
             });
         }
-        });
-
-        self.ocr_section(ui);
-
-        theme::card(ui, t("Watermark"), |ui| self.watermark_section(ui));
-
-        theme::card(ui, t("Export"), |ui| self.export_section(ui));
-        ui.add_space(10.0);
-
-        if ui.button(t("Reset to defaults")).clicked() {
-            self.style = Style::default();
-        }
-        ui.add_space(10.0);
     }
 
 
@@ -403,146 +415,20 @@ impl ShotrApp {
         }
     }
 
-    fn tool_section(&mut self, ui: &mut egui::Ui) {
-        theme::section(ui, t("Tools"));
-        ui.horizontal_wrapped(|ui| {
-            for tool in std::iter::once(Tool::Select).chain(Tool::DRAWABLE) {
-                if super::icons::tool_button(ui, tool, self.tool == tool).clicked() {
-                    self.tool = tool;
-                }
-            }
-        });
-
-        ui.add_space(4.0);
-
-        // Remember what the controls said before drawing them, so a change can
-        // be pushed onto the selected layer below.
-        let before = (
-            self.annot_color,
-            self.annot_stroke,
-            self.annot_font_size,
-            self.annot_blur,
-            self.annot_paint_alpha,
-        );
-
-        ui.horizontal(|ui| {
-            ui.label(t("Colour"));
-            color_button(ui, &mut self.annot_color);
-        });
-
-        if self.tool.uses_stroke() {
-            theme::slider_label(ui, t("Stroke"), self.annot_stroke.round() as u32);
-            ui.add(egui::Slider::new(&mut self.annot_stroke, 1.0..=40.0).show_value(false));
-        }
-        match self.tool {
-            Tool::Text => {
-                theme::slider_label(ui, t("Font size"), self.annot_font_size.round() as u32);
-                ui.add(egui::Slider::new(&mut self.annot_font_size, 10.0..=160.0).show_value(false));
-            }
-            Tool::Blur => {
-                theme::slider_label(ui, t("Blur amount"), self.annot_blur.round() as u32);
-                ui.add(egui::Slider::new(&mut self.annot_blur, 2.0..=60.0).show_value(false));
-            }
-            Tool::Highlight => {
-                // One dial from highlighter to solid cover, shown as a percent
-                // because "180 out of 255" means nothing to anyone.
-                let mut pct = (self.annot_paint_alpha as f32 / 255.0 * 100.0).round() as u8;
-                theme::slider_label(ui, t("Paint opacity"), format!("{pct}%"));
-                if ui
-                    .add(egui::Slider::new(&mut pct, 5..=100).show_value(false))
-                    .changed()
-                {
-                    self.annot_paint_alpha = (pct as f32 / 100.0 * 255.0).round() as u8;
-                }
-                ui.label(
-                    egui::RichText::new(t("100% covers completely; lower is translucent, like a highlighter."))
-                        .weak()
-                        .small(),
-                );
-            }
-            _ => {}
-        }
-
-        // Editing a shape you have already drawn is the whole reason these
-        // sliders feel broken otherwise: they used to set the defaults for the
-        // *next* shape only, so dragging them after drawing did nothing visible.
-        let after = (
-            self.annot_color,
-            self.annot_stroke,
-            self.annot_font_size,
-            self.annot_blur,
-            self.annot_paint_alpha,
-        );
-        if after != before
-            && let Some(i) = self.selected_layer
-            && let Some(kind) = self.layers.get(i).map(|l| l.kind)
-        {
-            // Work out the colour before taking the mutable borrow.
-            let ink = self.ink(kind);
-            let Some(layer) = self.layers.get_mut(i) else {
-                return;
-            };
-            layer.color = ink;
-            layer.stroke = self.annot_stroke;
-            layer.font_size = self.annot_font_size;
-            layer.blur = self.annot_blur;
-            self.dirty = true;
-        }
-
-        if self.tool == Tool::Text {
-            ui.label(
-                egui::RichText::new(t("Click the image and type. Enter to finish, Esc to cancel. Click existing text to edit it."))
-                    .weak()
-                    .small(),
-            );
-        }
-
-        ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            if ui
-                .add_enabled(self.undo.can_undo(), egui::Button::new("↶ Undo"))
-                .clicked()
-            {
-                self.undo_annotation();
-            }
-            if ui
-                .add_enabled(self.undo.can_redo(), egui::Button::new("↷ Redo"))
-                .clicked()
-            {
-                self.redo_annotation();
-            }
-            let has_sel = self.selected_layer.is_some();
-            if ui
-                .add_enabled(has_sel, egui::Button::new(t("Delete layer")))
-                .clicked()
-            {
-                self.delete_selected_layer();
-            }
-        });
-        if !self.layers.is_empty() && ui.button(t("Clear all annotations")).clicked() {
-            self.undo.push(&self.layers);
-            self.layers.clear();
-            self.selected_layer = None;
-            self.dirty = true;
-        }
-    }
-
+    /// Presets on one row: pick, name, save — the design puts them there
+    /// because they are one thought, not three sections.
     fn preset_row(&mut self, ui: &mut egui::Ui) {
-        theme::section(ui, t("Your presets"));
         let mut apply: Option<usize> = None;
         let mut delete: Option<usize> = None;
+        let matching = self.presets.iter().position(|p| p.style == self.style);
 
         ui.horizontal(|ui| {
-            let selected = self
-                .presets
-                .iter()
-                .position(|p| p.style == self.style)
+            let selected = matching
                 .map(|i| self.presets[i].name.clone())
                 .unwrap_or_else(|| "—".to_string());
-
             egui::ComboBox::from_id_salt("preset")
                 .selected_text(selected)
-                .width(180.0)
+                .width(126.0)
                 .show_ui(ui, |ui| {
                     if self.presets.is_empty() {
                         ui.label(egui::RichText::new(t("(no presets yet)")).weak());
@@ -554,28 +440,21 @@ impl ShotrApp {
                     }
                 });
 
-            let has_match = self.presets.iter().any(|p| p.style == self.style);
-            if ui
-                .add_enabled(has_match, egui::Button::new("🗑"))
-                .on_hover_text("Xoá preset đang khớp")
-                .clicked()
-                && let Some(i) = self
-                    .presets
-                    .iter()
-                    .position(|p| p.style == self.style)
-            {
-                delete = Some(i);
-            }
-        });
-
-        ui.horizontal(|ui| {
             ui.add(
                 egui::TextEdit::singleline(&mut self.preset_name)
-                    .hint_text("Preset name")
-                    .desired_width(180.0),
+                    .hint_text(t("Preset name"))
+                    .desired_width(84.0),
             );
             if ui.button(t("Save")).clicked() {
                 self.save_preset();
+            }
+            if matching.is_some()
+                && ui
+                    .small_button("🗑")
+                    .on_hover_text(t("Delete the preset that matches"))
+                    .clicked()
+            {
+                delete = matching;
             }
         });
 
@@ -747,10 +626,6 @@ impl ShotrApp {
         );
     }
 
-    fn ocr_section(&mut self, ui: &mut egui::Ui) {
-        theme::card(ui, t("Text recognition (OCR)"), |ui| self.ocr_body(ui));
-    }
-
     fn ocr_body(&mut self, ui: &mut egui::Ui) {
 
         match self.ocr_state.clone() {
@@ -789,7 +664,7 @@ impl ShotrApp {
                 return;
             }
             OcrState::Failed(e) => {
-                ui.colored_label(egui::Color32::from_rgb(0xff, 0x6b, 0x6b), e);
+                ui.colored_label(theme::pal().danger, e);
                 if ui.button(t("Try again")).clicked() {
                     let ctx = ui.ctx().clone();
                     self.start_ocr(&ctx);
@@ -951,98 +826,15 @@ impl ShotrApp {
         }
     }
 
-    // ------------------------------------------------------------- bottom bar
-
-    pub(super) fn bottom_bar(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(2.0);
-        ui.horizontal(|ui| {
-            if self.mode == Mode::Edit {
-                // Labelled with the shortcut, so it has to do what the shortcut
-                // does — copy and leave.
-                if ui.button("Copy  Ctrl+C").clicked() {
-                    let ctx = ui.ctx().clone();
-                    self.copy_and_close(&ctx);
-                }
-                if ui.button("Save  Ctrl+S").clicked() {
-                    self.do_save(None);
-                }
-                if ui.button("Save As…").clicked()
-                    && let Some(p) = export::save_as_dialog(&self.prefs)
-                {
-                    self.do_save(Some(p));
-                }
-
-                let label = match self.zoom {
-                    Zoom::Fit => format!("Fit · {}%", self.shown_zoom),
-                    Zoom::Percent(p) => format!("{p}%"),
-                };
-                egui::ComboBox::from_id_salt("zoom")
-                    .selected_text(label)
-                    .width(80.0)
-                    .show_ui(ui, |ui| {
-                        if ui.selectable_label(self.zoom == Zoom::Fit, "Fit").clicked() {
-                            self.set_zoom(Zoom::Fit);
-                        }
-                        for p in Zoom::STEPS {
-                            let on = self.zoom == Zoom::Percent(p);
-                            if ui.selectable_label(on, format!("{p}%")).clicked() {
-                                self.set_zoom(Zoom::Percent(p));
-                            }
-                        }
-                    });
-
-                egui::ComboBox::from_id_salt("more")
-                    .selected_text("More…")
-                    .width(96.0)
-                    .show_ui(ui, |ui| {
-                        if ui.button(t("Open image folder")).clicked() {
-                            self.open_output_dir();
-                            ui.close();
-                        }
-                        if ui.button(t("Copy the text in the image")).clicked() {
-                            self.copy_text(false);
-                            ui.close();
-                        }
-                        if ui.button(t("Take a new shot")).clicked() {
-                            self.start_capture(self.source);
-                            ui.close();
-                        }
-                        ui.separator();
-                        if ui.button(t("Reset to defaults")).clicked() {
-                            self.style = Style::default();
-                            ui.close();
-                        }
-                        ui.separator();
-                        ui.label(
-                            egui::RichText::new(concat!("shotr ", env!("CARGO_PKG_VERSION")))
-                                .weak()
-                                .small(),
-                        );
-                    });
-            }
-
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if self.mode == Mode::Edit {
-                    ui.label(
-                        egui::RichText::new(t("Double-click the image to copy and close"))
-                            .weak()
-                            .small(),
-                    );
-                }
-            });
-        });
-        if !self.status.is_empty() {
-            ui.label(egui::RichText::new(&self.status).small());
-        }
-        ui.add_space(2.0);
-    }
 }
 
-pub(super) fn color_button(ui: &mut egui::Ui, color: &mut Rgba8) {
+pub(super) fn color_button(ui: &mut egui::Ui, color: &mut Rgba8) -> egui::Response {
     let mut c = egui::Color32::from_rgba_unmultiplied(color[0], color[1], color[2], color[3]);
-    if ui.color_edit_button_srgba(&mut c).changed() {
+    let resp = ui.color_edit_button_srgba(&mut c);
+    if resp.changed() {
         *color = c.to_srgba_unmultiplied();
     }
+    resp
 }
 
 fn checkerboard(w: u32, h: u32) -> RgbaImage {
@@ -1105,9 +897,9 @@ mod tests {
     /// button padding the theme actually uses had to fit the real sidebar.
     #[test]
     fn the_shipped_sidebar_width_fits_five_columns() {
-        // The shipped panel, minus the frame margins and everything the
-        // scrollbar reserves: bar width + inner gap + outer gap.
-        let avail = 336.0 - 16.0 - (8.0 + 10.0 + 4.0);
+        // The shipped card, minus its 12 px of padding on each side and
+        // everything the scrollbar reserves: bar width + inner gap + outer gap.
+        let avail = 336.0 - 24.0 - (8.0 + 10.0 + 4.0);
         let side = grid_cell_side(avail, 5, 6.0, 7.0 * 2.0);
         assert!(side >= 30.0, "swatches would be too small to read: {side}");
         let used = (side + 14.0) * 5.0 + 6.0 * 4.0;

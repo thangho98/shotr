@@ -269,14 +269,28 @@ fn main() -> eframe::Result {
     // The region picker covers the screen and shows the shot at 1:1, so it
     // looks like you are selecting on the live desktop. macOS never reaches
     // here: Apple's overlay did the picking before this process opened anything.
+    //
+    // The editor has no system titlebar either: it draws its own frame, with
+    // the sidebar standing proud of it, so the window has to be transparent for
+    // the rounded corners and the shadow to composite. Transparency can only be
+    // asked for at creation, and the picker becomes the editor without being
+    // recreated — so both branches ask for it.
+    //
+    // Transparency is a request, not a guarantee: an X11 session with no
+    // compositor running has no way to honour it, and there the margin around
+    // the frame will read as black rather than as the desktop. Wayland, Windows
+    // and macOS all composite, so this only bites bare X11.
     let viewport = if matches!(start, Start::Picker(_)) {
         egui::ViewportBuilder::default()
             .with_decorations(false)
+            .with_transparent(true)
             .with_title("shotr")
             .with_fullscreen(true)
     } else {
         egui::ViewportBuilder::default()
-            .with_inner_size([1280.0, 820.0])
+            .with_decorations(false)
+            .with_transparent(true)
+            .with_inner_size([1320.0, 860.0])
             .with_min_inner_size([900.0, 560.0])
             .with_title("shotr")
     }

@@ -4,7 +4,7 @@ use eframe::egui;
 
 use crate::app::theme;
 use crate::i18n::{self, t};
-use crate::settings::{ExportFormat, Prefs};
+use crate::settings::{ExportFormat, Prefs, ThemeMode};
 
 pub fn general(ui: &mut egui::Ui, prefs: &mut Prefs) {
     theme::section(ui, t("Language"));
@@ -19,6 +19,28 @@ pub fn general(ui: &mut egui::Ui, prefs: &mut Prefs) {
             }
         }
     });
+
+    ui.add_space(12.0);
+    theme::section(ui, t("Theme"));
+    // Only the choice is made here. Applying it is the window's job — this one
+    // repaints itself on the next frame, and the editor reads the same setting.
+    ui.horizontal(|ui| {
+        for mode in ThemeMode::ALL {
+            if ui
+                .selectable_label(prefs.theme == mode, mode.label())
+                .clicked()
+            {
+                prefs.theme = mode;
+            }
+        }
+    });
+    if prefs.theme == ThemeMode::System {
+        ui.label(
+            egui::RichText::new(t("Changes with the desktop, while shotr is running."))
+                .weak()
+                .small(),
+        );
+    }
 
     ui.add_space(12.0);
     theme::section(ui, t("Where shots are saved"));

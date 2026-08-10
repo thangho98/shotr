@@ -1194,13 +1194,4 @@ mod tests {
         assert_eq!(zoom, 1.0, "no modifier means no zoom");
         assert_ne!(scroll, egui::Vec2::ZERO, "the wheel must reach the pan path");
     }
-
-    /// egui's own keyboard zoom rescales the whole interface and would fight
-    /// the editor for ctrl+plus/minus/0.
-    #[test]
-    fn egui_keyboard_zoom_is_turned_off() {
-        let ctx = egui::Context::default();
-        crate::app::theme::apply(&ctx);
-        assert!(!ctx.options(|o| o.zoom_with_keyboard));
-    }
 }

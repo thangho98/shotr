@@ -96,9 +96,11 @@ src/
     text.rs         glyph blitting
   app/
     mod.rs          application state and the eframe entry point
+    shell.rs        the editor's own window: frame, overhanging sidebar card,
+                    tool pill, top bar, status bar, drag and resize
     canvas.rs       the central image area and all pointer interaction
-    sidebar.rs      the control panel and bottom bar
-    icons.rs        tool glyphs, drawn rather than shipped
+    sidebar.rs      what goes inside the sidebar card
+    icons.rs        tool and chrome glyphs, drawn rather than shipped
     theme.rs        the visual style, in one place
     ocr_job.rs      running recognition off the UI thread
 ```
@@ -106,6 +108,45 @@ src/
 ## Things that will bite you
 
 These are all load-bearing. Each one cost real debugging time.
+
+**The editor has no system titlebar, and that costs three settings that have to
+agree.** It draws its own rounded frame with a sidebar card standing proud of
+it, which only works if the window is *both* undecorated and transparent —
+otherwise the corners and the shadow composite against an opaque rectangle and
+the whole effect reads as a grey box with a grey box on it. Transparency can
+only be asked for at creation (`with_transparent(true)` in `main.rs`), so both
+viewport branches ask for it even though only one of them is the editor; the
+picker becomes the editor without the window being recreated. And
+`leave_fullscreen` must send `Decorations(false)`, not `true` — turning them
+back on there puts a system titlebar above the card's own.
+
+The third setting is `clear_color`, and it is the one that is *not* uniform:
+transparent for the editor, `panel_fill` for the fullscreen picker. A
+transparent clear under the picker is a hole straight through to the desktop
+being selected on, anywhere the shot does not reach.
+
+**There is no z-order between egui panels, so the overhang cannot be panels.**
+A `SidePanel` cannot overlap a `CentralPanel`, and the whole design is a card
+that overlaps the frame by 20px and hangs 16px off it top and bottom. `shell.rs`
+is therefore one painter and a set of explicit rectangles, painted back to
+front, with `Ui::new_child` for anything that needs layout. Within one layer
+egui gives the click to the *last* widget that claimed the spot, which is what
+the drag bands (allocated before the buttons on them) and the resize bands
+(allocated after everything) rely on.
+
+**`Ui::new_child` without an `id_salt` gives every child the same id.** Read
+`ui.rs:269`: the salt defaults to `Id::from("child")`, so five sibling children
+share one `stable_id` and are told apart only by `next_auto_id_salt` — a
+*counter*. Skip one conditionally, as the shell does when the tool pill will not
+fit, and every later child silently changes identity: scroll offsets jump back
+to the top and any open combo box shuts. Give every `new_child` an explicit
+`.id_salt("…")`. Nothing warns about this.
+
+**`viewport().maximized` is not always reported.** It is an `Option`, and a
+compositor that never fills it in makes `unwrap_or(false)` a one-way door:
+every double click on the titlebar sends `Maximized(true)` and the window can
+never come back down. `shell` keeps its own `maximised` flag and only re-syncs
+it from the viewport when the viewport actually has an opinion.
 
 **A Wayland client cannot hide its own window.** `set_visible(false)` is a
 documented no-op. This is why capture runs as a *fresh process* that grabs the
@@ -294,6 +335,19 @@ on macOS and Windows, the interface fell back to the bundled font, and nothing
 said so. One list covers all three platforms — a path belonging to another
 system costs a failed `read` and nothing more.
 
+**egui keeps two styles, and `set_global_style` only writes to one of them.**
+There is a `dark_style` and a `light_style`, and `Options::theme_preference`
+picks between them — defaulting to `System`. At startup the system theme has
+not been delivered yet, so the style shotr installs lands in `dark_style`; the
+moment the desktop reports itself light, egui switches to `light_style`, which
+is stock egui and which nothing here has ever touched. The result is *half* a
+theme: panels, canvas, folds and everything painted by hand stay dark, while
+every button, text field and combo box turns white. It reads as a rendering
+fault rather than a theme one, and on a Mac set to "Auto" it appears at sunrise
+and goes away at sunset. `theme::apply` therefore pins
+`ThemePreference::Dark` *before* it touches the style. shotr is dark on purpose
+— the shot is meant to be the only bright thing on screen.
+
 **egui diverts ctrl+wheel.** With the zoom modifier held, `smooth_scroll_delta`
 is zero and the wheel arrives as `zoom_delta()`. `zoom_with_keyboard` is turned
 off in `theme::apply` so egui does not rescale the whole UI on ctrl+plus.
@@ -450,6 +504,8 @@ GPLv2 direction — is a licensing decision, not a routine `cargo add`.
 | Window list in tray | yes | yes | no — the overlay lists them |
 | Tray daemon | ksni (SNI over D-Bus) | tray-icon on winit | tray-icon on winit |
 | Single instance | unix socket | named pipe | unix socket |
+| Editor window controls | drawn: — ▢ ✕, right of the strip | same | Apple's lights, left of the strip |
+| Editor window transparency | yes, given a compositor | yes | yes |
 | Capture hotkey | the desktop binds `shotr --capture` | the desktop binds it | shotr binds it, in Preferences |
 | Screen recording grant | — | — | TCC, per bundle |
 | OCR (Vietnamese) | tesseract | tesseract if installed | tesseract if installed |

@@ -7,6 +7,42 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// Which palette the interface uses.
+///
+/// Lives here rather than beside the palettes because it is a setting first:
+/// [`Prefs`] has to name it, and the settings layer knows nothing about how a
+/// colour gets painted.
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Debug, Default)]
+pub enum ThemeMode {
+    /// Follow the desktop, and go on following it while shotr is open.
+    #[default]
+    System,
+    Dark,
+    Light,
+}
+
+impl ThemeMode {
+    pub const ALL: [ThemeMode; 3] = [ThemeMode::System, ThemeMode::Dark, ThemeMode::Light];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ThemeMode::System => crate::i18n::t("Follow the desktop"),
+            ThemeMode::Dark => crate::i18n::t("Dark"),
+            ThemeMode::Light => crate::i18n::t("Light"),
+        }
+    }
+
+    /// How egui spells the same choice.
+    pub fn preference(self) -> eframe::egui::ThemePreference {
+        use eframe::egui::ThemePreference;
+        match self {
+            ThemeMode::System => ThemePreference::System,
+            ThemeMode::Dark => ThemePreference::Dark,
+            ThemeMode::Light => ThemePreference::Light,
+        }
+    }
+}
+
 /// Output file format.
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Debug)]
 pub enum ExportFormat {
@@ -58,6 +94,8 @@ impl ExportFormat {
 pub struct Prefs {
     /// Interface language.
     pub lang: crate::i18n::Lang,
+    /// Interface palette.
+    pub theme: ThemeMode,
     /// Where exports land. `None` means the platform's Pictures directory —
     /// stored rather than resolved so that a directory going missing later
     /// falls back instead of failing.
@@ -99,6 +137,7 @@ impl Default for Prefs {
     fn default() -> Self {
         Self {
             lang: crate::i18n::Lang::default(),
+            theme: ThemeMode::default(),
             save_dir: None,
             format: ExportFormat::Png,
             jpeg_quality: 90,

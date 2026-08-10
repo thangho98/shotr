@@ -14,8 +14,130 @@ use crate::annotate::Tool;
 /// Side of a tool button, in points.
 pub const BUTTON: f32 = 34.0;
 
+/// The glyphs the window chrome needs that are not tools.
+///
+/// Drawn rather than typed for the same reason the tool icons are. The obvious
+/// characters — `↶ ↷ ⋯ ▢` — are not in Latin-1, and this project has already
+/// been bitten once by assuming a font covers a range it does not: the
+/// Vietnamese tone marks in U+1EA0–U+1EF9 rendered as empty boxes for a while.
+/// A missing glyph in a *window control* would be worse, because the button
+/// would still work and simply look broken.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Glyph {
+    Undo,
+    Redo,
+    /// The "more" affordance: three dots.
+    More,
+    /// The window controls. `cfg`-ed away on macOS, which draws Apple's
+    /// coloured lights instead and must not be able to reach for these.
+    #[cfg(not(target_os = "macos"))]
+    Close,
+    #[cfg(not(target_os = "macos"))]
+    Minimise,
+    #[cfg(not(target_os = "macos"))]
+    Maximise,
+}
+
+/// Paint one chrome glyph inside `rect`.
+pub fn draw_glyph(painter: &egui::Painter, rect: egui::Rect, glyph: Glyph, color: egui::Color32) {
+    let box_ = rect.shrink(rect.width() * 0.24);
+    let at =
+        |x: f32, y: f32| egui::pos2(box_.min.x + x * box_.width(), box_.min.y + y * box_.height());
+    let w = (rect.width() * 0.075).max(1.2);
+    let stroke = egui::Stroke::new(w, color);
+
+    match glyph {
+        Glyph::Undo | Glyph::Redo => {
+            // An arrow that goes over the top and comes back down on the side
+            // it points to. The head has to sit exactly on the arc's end — the
+            // first version put it near one and the pair read as two plain
+            // semicircles, which is indistinguishable from a reload icon.
+            let mirror = |x: f32| if glyph == Glyph::Undo { x } else { 1.0 - x };
+            let (cx, cy, r) = (0.5_f32, 0.70_f32, 0.34_f32);
+            let arc: Vec<egui::Pos2> = (0..=24)
+                .map(|i| {
+                    let a = std::f32::consts::PI * (1.0 - i as f32 / 24.0);
+                    at(mirror(cx + r * a.cos()), cy - r * a.sin())
+                })
+                .collect();
+            painter.add(egui::Shape::line(arc, stroke));
+            let tip = at(mirror(cx - r), cy);
+            for dx in [-0.15_f32, 0.15] {
+                painter.line_segment([tip, at(mirror(cx - r + dx), cy - 0.17)], stroke);
+            }
+        }
+        Glyph::More => {
+            for x in [0.12_f32, 0.5, 0.88] {
+                painter.circle_filled(at(x, 0.5), w * 0.9, color);
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        Glyph::Close => {
+            painter.line_segment([at(0.05, 0.05), at(0.95, 0.95)], stroke);
+            painter.line_segment([at(0.95, 0.05), at(0.05, 0.95)], stroke);
+        }
+        #[cfg(not(target_os = "macos"))]
+        Glyph::Minimise => {
+            painter.line_segment([at(0.02, 0.5), at(0.98, 0.5)], stroke);
+        }
+        #[cfg(not(target_os = "macos"))]
+        Glyph::Maximise => {
+            painter.rect_stroke(
+                egui::Rect::from_two_pos(at(0.06, 0.06), at(0.94, 0.94)),
+                1.0,
+                stroke,
+                egui::StrokeKind::Middle,
+            );
+        }
+    }
+}
+
+/// A square button carrying one chrome glyph.
+pub fn glyph_button(
+    ui: &mut egui::Ui,
+    glyph: Glyph,
+    enabled: bool,
+    size: egui::Vec2,
+) -> egui::Response {
+    // A disabled button keeps its space in the row — the bar must not reflow as
+    // undo becomes available — but stops reporting clicks entirely.
+    let sense = if enabled {
+        egui::Sense::click()
+    } else {
+        egui::Sense::hover()
+    };
+    let (rect, response) = ui.allocate_exact_size(size, sense);
+    let hot = enabled && response.hovered();
+    if hot {
+        ui.painter()
+            .rect_filled(rect, 6.0, ui.visuals().widgets.hovered.bg_fill);
+    }
+    let color = if enabled {
+        ui.visuals().widgets.inactive.fg_stroke.color
+    } else {
+        super::theme::pal().text_dim.gamma_multiply(0.45)
+    };
+    let side = size.min_elem();
+    draw_glyph(
+        ui.painter(),
+        egui::Rect::from_center_size(rect.center(), egui::Vec2::splat(side)),
+        glyph,
+        color,
+    );
+    response
+}
+
 /// A tool button: icon, selected state, and the tool's name as a tooltip.
-pub fn tool_button(ui: &mut egui::Ui, tool: Tool, selected: bool) -> egui::Response {
+///
+/// `key` is the digit that selects the tool from the keyboard. It is printed in
+/// the corner of the button and repeated in the tooltip, because a shortcut
+/// nobody can see is a shortcut nobody uses.
+pub fn tool_button(
+    ui: &mut egui::Ui,
+    tool: Tool,
+    selected: bool,
+    key: Option<char>,
+) -> egui::Response {
     let (rect, response) =
         ui.allocate_exact_size(egui::vec2(BUTTON, BUTTON), egui::Sense::click());
 
@@ -49,7 +171,24 @@ pub fn tool_button(ui: &mut egui::Ui, tool: Tool, selected: bool) -> egui::Respo
         visuals.fg_stroke.color
     };
     draw(painter, rect, tool, ink);
-    response.on_hover_text(tool.label())
+
+    match key {
+        Some(digit) => {
+            painter.text(
+                rect.right_bottom() - egui::vec2(3.0, 1.0),
+                egui::Align2::RIGHT_BOTTOM,
+                digit,
+                egui::FontId::monospace(9.0),
+                if selected {
+                    super::theme::ACCENT
+                } else {
+                    super::theme::pal().text_dim
+                },
+            );
+            response.on_hover_text(format!("{}  {digit}", tool.label()))
+        }
+        None => response.on_hover_text(tool.label()),
+    }
 }
 
 /// The square a glyph is drawn into: inset from the button so neighbouring
@@ -167,6 +306,37 @@ mod tests {
                         &painter,
                         egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(side, side)),
                         tool,
+                        egui::Color32::WHITE,
+                    );
+                }
+            }
+        });
+    }
+
+    /// The chrome glyphs stand in for characters that would otherwise be at
+    /// the mercy of whatever font the system supplies, so every one of them
+    /// has to actually draw — at the sizes the top bar and the strip use.
+    #[test]
+    fn every_chrome_glyph_draws_without_panicking() {
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let painter = ui.painter().clone();
+            for glyph in [
+                Glyph::Undo,
+                Glyph::Redo,
+                Glyph::More,
+                #[cfg(not(target_os = "macos"))]
+                Glyph::Close,
+                #[cfg(not(target_os = "macos"))]
+                Glyph::Minimise,
+                #[cfg(not(target_os = "macos"))]
+                Glyph::Maximise,
+            ] {
+                for side in [10.0_f32, 22.0, 24.0, 48.0] {
+                    draw_glyph(
+                        &painter,
+                        egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(side, side)),
+                        glyph,
                         egui::Color32::WHITE,
                     );
                 }
