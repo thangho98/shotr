@@ -441,7 +441,7 @@ fn style_for(pal: &Palette) -> egui::Style {
 }
 
 /// Put a Vietnamese-capable system font in front of egui's bundled one.
-fn install_fonts(ctx: &egui::Context) -> Option<ab_glyph::FontArc> {
+pub(crate) fn install_fonts(ctx: &egui::Context) -> Option<ab_glyph::FontArc> {
     let (data, font) = crate::render::text::load_system_font()?;
     let mut fonts = egui::FontDefinitions::default();
     fonts.font_data.insert(

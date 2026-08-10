@@ -578,8 +578,9 @@ impl ShotrApp {
         let c = draft.color;
         let color = egui::Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3]);
 
-        // The same system font backs egui and the exporter, so what is on
-        // screen here is what gets baked.
+        // The same system font backs egui and the exporter, and `text::px_scale`
+        // is what makes the same number mean the same size to both, so what is
+        // on screen here is what gets baked.
         let galley = painter.layout_no_wrap(draft.text.clone(), font.clone(), color);
         let size = galley.size();
         painter.galley(origin, galley, color);

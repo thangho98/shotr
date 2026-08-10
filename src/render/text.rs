@@ -8,9 +8,27 @@ use image::{Rgba, RgbaImage};
 
 use super::frame::blend;
 
-/// Width in pixels the string will occupy at `px` size.
-pub fn measure(font: &FontArc, px: f32, text: &str) -> f32 {
-    let scaled = font.as_scaled(PxScale::from(px));
+/// The scale `ab_glyph` needs to draw a font at `em` pixels to the em square.
+///
+/// `PxScale` is *not* an em size: `ScaleFont::scale_factor` divides it by the
+/// font's line height — ascent − descent + line gap — while egui, and everyone
+/// else who says "font size", divides by the em square. The same number
+/// therefore drew two different sizes, and only one of them ended up in the
+/// picture: a label followed the pointer at egui's size, then shrank by about a
+/// sixth the moment it was baked, leaving the selection frame — measured with
+/// egui — standing off the ink. Every entry point here takes an em size.
+fn px_scale(font: &FontArc, em: f32) -> PxScale {
+    match font.units_per_em() {
+        Some(upem) if upem > 0.0 && font.height_unscaled() > 0.0 => {
+            PxScale::from(em * font.height_unscaled() / upem)
+        }
+        _ => PxScale::from(em),
+    }
+}
+
+/// Width in pixels the string will occupy at `em` size.
+pub fn measure(font: &FontArc, em: f32, text: &str) -> f32 {
+    let scaled = font.as_scaled(px_scale(font, em));
     let mut width = 0.0;
     let mut prev = None;
     for c in text.chars() {
@@ -28,13 +46,13 @@ pub fn measure(font: &FontArc, px: f32, text: &str) -> f32 {
 pub fn draw(
     img: &mut RgbaImage,
     font: &FontArc,
-    px: f32,
+    em: f32,
     x: f32,
     y: f32,
     color: Rgba<u8>,
     text: &str,
 ) {
-    let scaled = font.as_scaled(PxScale::from(px));
+    let scaled = font.as_scaled(px_scale(font, em));
     let mut caret = point(x, y + scaled.ascent());
     let mut prev = None;
 
@@ -116,6 +134,8 @@ pub fn load_system_font() -> Option<(Vec<u8>, FontArc)> {
 
 #[cfg(test)]
 mod font_lookup_tests {
+    use eframe::egui;
+
     use super::FONT_CANDIDATES;
 
     /// This list was Linux-only for a while, and nothing broke loudly: the
@@ -135,6 +155,47 @@ mod font_lookup_tests {
                 "no font path for {platform}, so its interface loses every Vietnamese diacritic"
             );
         }
+    }
+
+    /// The editor lays a label out with egui and the exporter bakes it with
+    /// `ab_glyph`, and the whole design assumes the two agree — the selection
+    /// frame is measured with one and drawn around the other. They did not:
+    /// `PxScale` normalises by the line height and egui by the em square, so a
+    /// label followed the pointer at one size and shrank the moment it settled,
+    /// leaving the frame standing off the text.
+    #[test]
+    fn the_exporter_and_the_editor_lay_a_label_out_at_the_same_size() {
+        let Some((_, font)) = super::load_system_font() else {
+            return; // no system font: egui falls back and the exporter draws nothing
+        };
+        let ctx = egui::Context::default();
+        crate::app::theme::install_fonts(&ctx);
+
+        let (text, size) = ("Xin chào, world", 40.0_f32);
+        let baked = super::measure(&font, size, text);
+        // Twice: `set_fonts` is applied at the start of the next pass.
+        let mut laid_out = 0.0;
+        for _ in 0..2 {
+            let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+                laid_out = ui
+                    .painter()
+                    .layout_no_wrap(
+                        text.to_owned(),
+                        egui::FontId::new(size, egui::FontFamily::Proportional),
+                        egui::Color32::WHITE,
+                    )
+                    .size()
+                    .x;
+            });
+        }
+
+        let off = (baked - laid_out).abs() / laid_out;
+        assert!(
+            off < 0.03,
+            "the exporter draws {text:?} {baked}px wide and the editor {laid_out}px — \
+             {:.0}% apart, so the selection frame cannot fit the baked label",
+            off * 100.0
+        );
     }
 
     #[test]

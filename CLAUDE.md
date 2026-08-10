@@ -406,6 +406,18 @@ because `Painter::image` records only the texture *id* and egui uploads that
 id's delta before it draws the frame's shapes. A test drives a real `Context` to
 pin that, because an egui upgrade could take it away with no error anywhere.
 
+**`ab_glyph`'s `PxScale` is not a font size.** `ScaleFont::scale_factor`
+divides it by the font's *line height* — ascent − descent + line gap — while
+egui, and everyone else who says "font size", divides by the em square. The
+same number is therefore about 15% smaller through `render::text` than through
+egui, measured on SF Pro with a real `Context`. Both engines draw labels here:
+egui under the pointer and for the selection frame, `ab_glyph` into the picture.
+So a label followed the mouse at one size, shrank the moment it settled, and sat
+loose inside a frame that had fitted it a frame earlier — reported as the frame
+being too big, which sends you looking at `selection_rect` where nothing is
+wrong. `text::px_scale` converts, and a test lays the same string out both ways
+and fails if they drift apart.
+
 **Nothing that follows the pointer may set `dirty`.** One preview render costs
 275ms at the default look and up to 2s with a big shadow — measured with
 `examples/render_demo` on an 8.6Mpx shot — so a gesture that re-bakes the bitmap
