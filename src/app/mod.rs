@@ -69,6 +69,8 @@ pub enum Start {
 }
 
 pub(crate) const SIDEBAR_W: f32 = 336.0;
+/// How long a status message holds the line before the tool hint returns.
+pub(crate) const STATUS_SECONDS: f64 = 6.0;
 pub(crate) const PREVIEW_MAX_W: u32 = 1000;
 pub(crate) const SWATCH_PX: u32 = 56;
 
@@ -309,6 +311,24 @@ pub struct ShotrApp {
     /// The 1×N ramp the sidebar card is painted with. Built once, on the first
     /// frame that has a `Context` to build it in.
     pub(crate) sidebar_grad: Option<egui::TextureHandle>,
+    /// Where the pointer sat, relative to the shape's own angle, when a
+    /// rotation drag began. `None` means the drag is a move, not a turn.
+    pub(crate) turn_from: Option<f32>,
+    /// The annotation the overlay owns this frame, and which the preview bitmap
+    /// therefore leaves out.
+    ///
+    /// Two reasons to take one out: a drag, so it can follow the pointer
+    /// without a ghost sitting at the old spot; and selection of a stroked
+    /// shape, so the halo can be drawn *under* the ink rather than over it.
+    pub(crate) detached_layer: Option<usize>,
+    /// The last message shown, and when it stops being worth the space.
+    ///
+    /// Messages like "Saved: …" are news, not a permanent caption — but the
+    /// status line is also where the editor explains the current tool, and a
+    /// message that never expires holds that line for the whole session. The
+    /// text is compared rather than every assignment site being changed.
+    pub(crate) status_shown: String,
+    pub(crate) status_until: f64,
     /// Our own idea of whether the window is maximised. With the titlebar gone
     /// this is the only thing the maximise button can toggle against — see
     /// [`shell`].
@@ -411,6 +431,10 @@ impl ShotrApp {
             copy_on_finish: false,
             detected_inset: None,
             show_custom_size: false,
+            turn_from: None,
+            detached_layer: None,
+            status_shown: String::new(),
+            status_until: 0.0,
             open_section: Some(Section::Background),
             sidebar_grad: None,
             maximised: false,
@@ -833,7 +857,7 @@ impl ShotrApp {
     }
 
     fn rebuild_texture(&mut self, ctx: &egui::Context) {
-        let layers = self.all_layers();
+        let layers = self.layers_except(self.detached_layer);
         let rendered =
             render_detailed(&self.scene(&self.shot_preview, self.preview_scale, &layers));
         self.preview_geom = rendered.geom;
@@ -965,6 +989,14 @@ impl eframe::App for ShotrApp {
         // Under `ThemeMode::System` the answer changes when the desktop does,
         // with no warning — so it is asked every frame rather than at startup.
         theme::sync(&ctx);
+
+        // A message is news for a few seconds, then the status line goes back
+        // to explaining the tool in hand.
+        let now = ctx.input(|i| i.time);
+        if self.status != self.status_shown {
+            self.status_shown = self.status.clone();
+            self.status_until = now + STATUS_SECONDS;
+        }
 
         self.poll_ocr(&ctx);
         if self.want_ocr && self.mode == Mode::Edit {
@@ -1131,31 +1163,32 @@ fn plain_key(events: &[egui::Event], key: egui::Key) -> bool {
     })
 }
 
-/// The key that types `digit`. The pill prints these on its buttons, so the two
+/// The key that types `label`. The pill prints these on its buttons, so the two
 /// must agree; there is a test that walks the whole list.
-fn digit_key(digit: char) -> Option<egui::Key> {
-    Some(match digit {
+fn tool_key(label: char) -> Option<egui::Key> {
+    Some(match label {
         '1' => egui::Key::Num1,
         '2' => egui::Key::Num2,
         '3' => egui::Key::Num3,
         '4' => egui::Key::Num4,
         '5' => egui::Key::Num5,
         '6' => egui::Key::Num6,
-        '7' => egui::Key::Num7,
+        // Left of `1`, and the tool reached most often.
+        '`' => egui::Key::Backtick,
         _ => return None,
     })
 }
 
 impl ShotrApp {
-    /// `1`–`7` pick a tool and Esc goes back to Select.
+    /// The tool keys, and Esc to go back to Select.
     ///
     /// Only reached with the editor up and nothing being typed — the caller
     /// guards both — because a bare digit is a character before it is a
     /// shortcut, and a label being written must get it.
     fn tool_keys(&mut self, ctx: &egui::Context) {
         let (picked, escape) = ctx.input(|i| {
-            let picked = shell::TOOLS.iter().find(|(_, digit)| {
-                digit_key(*digit).is_some_and(|k| plain_key(&i.events, k))
+            let picked = shell::TOOLS.iter().find(|(_, key)| {
+                tool_key(*key).is_some_and(|k| plain_key(&i.events, k))
             });
             (picked.map(|(tool, _)| *tool), plain_key(&i.events, egui::Key::Escape))
         });
@@ -1481,25 +1514,25 @@ mod shortcut_tests {
         );
     }
 
-    /// The digit printed on a tool button is a promise that the key works. If
+    /// The label printed on a tool button is a promise that the key works. If
     /// the two drift, the button says "3" and pressing 3 does nothing — a
     /// failure that produces no error anywhere.
     #[test]
-    fn every_digit_printed_on_the_pill_maps_to_a_real_key() {
-        for (tool, digit) in super::shell::TOOLS {
+    fn every_label_printed_on_the_pill_maps_to_a_real_key() {
+        for (tool, label) in super::shell::TOOLS {
             assert!(
-                super::digit_key(digit).is_some(),
-                "{tool:?} prints {digit:?} on its button but no key produces it"
+                super::tool_key(label).is_some(),
+                "{tool:?} prints {label:?} on its button but no key produces it"
             );
         }
     }
 
-    /// A tool key has to be the bare digit. `⌘1` is "back to 100%" and `⌘0` is
-    /// "fit to the window", so a digit handler that tolerated modifiers would
-    /// change the tool every time someone zoomed.
+    /// A tool key has to be unmodified. `⌘1` is "back to 100%" and `⌘0` is
+    /// "fit to the window", so a handler that tolerated modifiers would change
+    /// the tool every time someone zoomed.
     #[test]
-    fn a_modified_digit_does_not_pick_a_tool() {
-        let key = super::digit_key('1').expect("1 is the Arrow tool's key");
+    fn a_modified_key_does_not_pick_a_tool() {
+        let key = super::tool_key('1').expect("1 is the Arrow tool's key");
         assert!(
             !super::plain_key(&[press(key, CTRL)], key),
             "Ctrl+1 would switch tool while zooming back to 100%"

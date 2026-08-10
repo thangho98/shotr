@@ -70,6 +70,7 @@ impl Tool {
 }
 
 #[derive(Clone, PartialEq, Serialize, Deserialize, Debug)]
+#[serde(default = "Layer::placeholder")]
 pub struct Layer {
     pub kind: Tool,
     /// Drag start, in original screenshot pixels.
@@ -81,6 +82,12 @@ pub struct Layer {
     pub text: String,
     pub font_size: f32,
     pub blur: f32,
+    /// Turn about the shape's own centre, in radians, clockwise on screen.
+    ///
+    /// Only the tools that *draw* something carry this. Blur and Fill cover
+    /// information rather than decorate it, so there is nothing to gain by
+    /// tilting them and [`Layer::turnable`] says so.
+    pub angle: f32,
 }
 
 impl Layer {
@@ -101,7 +108,41 @@ impl Layer {
             text: String::new(),
             font_size,
             blur,
+            angle: 0.0,
         }
+    }
+
+    /// A blank layer, only so `serde(default)` has something to fill new fields
+    /// from when an older saved layer is read back.
+    fn placeholder() -> Self {
+        Self::new(Tool::Select, [0.0, 0.0], [0, 0, 0, 255], 1.0, 12.0, 1.0)
+    }
+
+    /// The point a rotation turns about.
+    pub fn centre(&self) -> [f32; 2] {
+        match self.kind {
+            // A label grows right and down from where it was placed, and its
+            // width is not in the struct, so its own origin is the only anchor
+            // both the renderer and the editor can agree on without measuring.
+            Tool::Text => self.a,
+            _ => [(self.a[0] + self.b[0]) / 2.0, (self.a[1] + self.b[1]) / 2.0],
+        }
+    }
+
+    /// Whether turning this tool means anything.
+    pub fn turnable(kind: Tool) -> bool {
+        !matches!(kind, Tool::Blur | Tool::Fill | Tool::Select)
+    }
+
+    /// `p` brought back into the shape's own upright frame.
+    pub fn unturn(&self, p: [f32; 2]) -> [f32; 2] {
+        if self.angle.abs() < 1e-4 {
+            return p;
+        }
+        let c = self.centre();
+        let (sin, cos) = (-self.angle).sin_cos();
+        let (dx, dy) = (p[0] - c[0], p[1] - c[1]);
+        [c[0] + dx * cos - dy * sin, c[1] + dx * sin + dy * cos]
     }
 
     /// Axis-aligned bounds in original screenshot pixels, padded for the stroke.
@@ -117,6 +158,7 @@ impl Layer {
 
     pub fn hit(&self, x: f32, y: f32) -> bool {
         let [x0, y0, x1, y1] = self.bounds();
+        let [x, y] = self.unturn([x, y]);
         x >= x0 && x <= x1 && y >= y0 && y <= y1
     }
 
@@ -148,17 +190,22 @@ pub fn apply(img: &mut RgbaImage, layers: &[Layer], scale: f32, font: Option<&Fo
         let a = [layer.a[0] * scale, layer.a[1] * scale];
         let b = [layer.b[0] * scale, layer.b[1] * scale];
         let stroke = (layer.stroke * scale).max(1.0);
+        let c = layer.centre();
+        let turn = Turn {
+            angle: layer.angle,
+            centre: [c[0] * scale, c[1] * scale],
+        };
         match layer.kind {
-            Tool::Arrow => draw_arrow(img, a, b, stroke, layer.color),
-            Tool::Rect => draw_rect(img, a, b, stroke, layer.color),
-            Tool::Ellipse => draw_ellipse(img, a, b, stroke, layer.color),
-            Tool::Highlight => draw_paint(img, a, b, layer.color),
+            Tool::Arrow => draw_arrow(img, a, b, stroke, layer.color, turn, scale),
+            Tool::Rect => draw_rect(img, a, b, stroke, layer.color, turn),
+            Tool::Ellipse => draw_ellipse(img, a, b, stroke, layer.color, turn),
+            Tool::Highlight => draw_paint(img, a, b, layer.color, turn),
             Tool::Fill => draw_fill(img, a, b, layer.color),
             Tool::Blur => draw_blur(img, a, b, (layer.blur * scale).max(1.0)),
             Tool::Text => {
                 if let Some(font) = font {
                     let size = (layer.font_size * scale).max(6.0);
-                    text::draw(img, font, size, a[0], a[1], Rgba(layer.color), &layer.text);
+                    draw_text(img, font, size, a, Rgba(layer.color), &layer.text, layer.angle);
                 }
             }
             Tool::Select => {}
@@ -204,6 +251,66 @@ fn sd_ellipse_outline(px: f32, py: f32, cx: f32, cy: f32, rx: f32, ry: f32) -> f
 
 /// Rasterise a shape over its bounding box, `sdf` returning distance to the
 /// figure and `cov` converting that to coverage.
+/// How a shape is turned: by `angle`, about `centre` in the pixels being drawn
+/// into. The two always travel together, so they travel as one.
+#[derive(Clone, Copy)]
+struct Turn {
+    angle: f32,
+    centre: [f32; 2],
+}
+
+/// Rasterise a shape turned about `centre`.
+///
+/// Rotation costs nothing here but turning the *sample point* back into the
+/// shape's upright frame — the distance field never learns about the angle.
+/// That is why tilting an arrow needed no new geometry: every shape already
+/// answers "how far is this pixel from me?", and asking it about a different
+/// pixel is the whole of the change.
+fn rasterise_turned(
+    img: &mut RgbaImage,
+    bounds: [f32; 4],
+    color: Rgba8,
+    turn: Turn,
+    sdf: impl Fn(f32, f32) -> f32,
+    half_stroke: f32,
+) {
+    let Turn { angle, centre } = turn;
+    if angle.abs() < 1e-4 {
+        rasterise(img, bounds, color, sdf, half_stroke);
+        return;
+    }
+    // The upright bounds no longer contain the shape, so sweep the box that
+    // holds them once turned.
+    let (sin, cos) = angle.sin_cos();
+    let (cx, cy) = (centre[0], centre[1]);
+    let mut swept = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
+    for (x, y) in [
+        (bounds[0], bounds[1]),
+        (bounds[2], bounds[1]),
+        (bounds[2], bounds[3]),
+        (bounds[0], bounds[3]),
+    ] {
+        let (dx, dy) = (x - cx, y - cy);
+        let (rx, ry) = (cx + dx * cos - dy * sin, cy + dx * sin + dy * cos);
+        swept[0] = swept[0].min(rx);
+        swept[1] = swept[1].min(ry);
+        swept[2] = swept[2].max(rx);
+        swept[3] = swept[3].max(ry);
+    }
+
+    let (usin, ucos) = (-angle).sin_cos();
+    rasterise(
+        img,
+        swept,
+        color,
+        |px, py| {
+            let (dx, dy) = (px - cx, py - cy);
+            sdf(cx + dx * ucos - dy * usin, cy + dx * usin + dy * ucos)
+        },
+        half_stroke,
+    );
+}
+
 fn rasterise(
     img: &mut RgbaImage,
     bounds: [f32; 4],
@@ -229,18 +336,29 @@ fn rasterise(
 
 // ------------------------------------------------------------------- drawing
 
-fn draw_arrow(img: &mut RgbaImage, a: [f32; 2], b: [f32; 2], stroke: f32, color: Rgba8) {
+fn draw_arrow(
+    img: &mut RgbaImage,
+    a: [f32; 2],
+    b: [f32; 2],
+    stroke: f32,
+    color: Rgba8,
+    turn: Turn,
+    scale: f32,
+) {
     let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
     let len = (dx * dx + dy * dy).sqrt();
     if len < 1.0 {
         return;
     }
-    let head = (stroke * 4.0).max(10.0).min(len);
-    let angle = dy.atan2(dx);
+    // The floor is 10 *shot* pixels, so it has to be scaled with everything
+    // else. A bare 10 here is 10 preview pixels in the preview and 10 export
+    // pixels in the export, which gave the same arrow two different heads.
+    let head = (stroke * 4.0).max(10.0 * scale).min(len);
+    let along = dy.atan2(dx);
 
     // Two barbs swept back from the tip at ±28°.
     let barb = |sign: f32| -> [f32; 2] {
-        let t = angle + std::f32::consts::PI + sign * 0.49;
+        let t = along + std::f32::consts::PI + sign * 0.49;
         [b[0] + head * t.cos(), b[1] + head * t.sin()]
     };
     let (l, r) = (barb(-1.0), barb(1.0));
@@ -251,10 +369,11 @@ fn draw_arrow(img: &mut RgbaImage, a: [f32; 2], b: [f32; 2], stroke: f32, color:
     let x1 = a[0].max(b[0]).max(l[0]).max(r[0]) + pad;
     let y1 = a[1].max(b[1]).max(l[1]).max(r[1]) + pad;
 
-    rasterise(
+    rasterise_turned(
         img,
         [x0, y0, x1, y1],
         color,
+        turn,
         |px, py| {
             sd_segment(px, py, a, b)
                 .min(sd_segment(px, py, b, l))
@@ -264,31 +383,47 @@ fn draw_arrow(img: &mut RgbaImage, a: [f32; 2], b: [f32; 2], stroke: f32, color:
     );
 }
 
-fn draw_rect(img: &mut RgbaImage, a: [f32; 2], b: [f32; 2], stroke: f32, color: Rgba8) {
+fn draw_rect(
+    img: &mut RgbaImage,
+    a: [f32; 2],
+    b: [f32; 2],
+    stroke: f32,
+    color: Rgba8,
+    turn: Turn,
+) {
     let (x0, x1) = min_max(a[0], b[0]);
     let (y0, y1) = min_max(a[1], b[1]);
     let (cx, cy) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
     let (hw, hh) = ((x1 - x0) / 2.0, (y1 - y0) / 2.0);
     let pad = stroke + 2.0;
-    rasterise(
+    rasterise_turned(
         img,
         [x0 - pad, y0 - pad, x1 + pad, y1 + pad],
         color,
+        turn,
         |px, py| sd_box_outline(px, py, cx, cy, hw, hh),
         stroke / 2.0,
     );
 }
 
-fn draw_ellipse(img: &mut RgbaImage, a: [f32; 2], b: [f32; 2], stroke: f32, color: Rgba8) {
+fn draw_ellipse(
+    img: &mut RgbaImage,
+    a: [f32; 2],
+    b: [f32; 2],
+    stroke: f32,
+    color: Rgba8,
+    turn: Turn,
+) {
     let (x0, x1) = min_max(a[0], b[0]);
     let (y0, y1) = min_max(a[1], b[1]);
     let (cx, cy) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
     let (rx, ry) = ((x1 - x0) / 2.0, (y1 - y0) / 2.0);
     let pad = stroke + 2.0;
-    rasterise(
+    rasterise_turned(
         img,
         [x0 - pad, y0 - pad, x1 + pad, y1 + pad],
         color,
+        turn,
         |px, py| sd_ellipse_outline(px, py, cx, cy, rx, ry),
         stroke / 2.0,
     );
@@ -306,13 +441,66 @@ fn draw_ellipse(img: &mut RgbaImage, a: [f32; 2], b: [f32; 2], stroke: f32, colo
 /// Turned up, the ink stops being translucent and becomes coverage, reaching
 /// the flat colour exactly at the top of the range. That end of the dial is
 /// what used to be a separate "cover" tool.
-fn draw_paint(img: &mut RgbaImage, a: [f32; 2], b: [f32; 2], color: Rgba8) {
+fn draw_paint(
+    img: &mut RgbaImage,
+    a: [f32; 2],
+    b: [f32; 2],
+    color: Rgba8,
+    turn: Turn,
+) {
+    // Paint blends rather than stamping a distance field, so it cannot borrow
+    // `rasterise_turned`. Same idea though: sweep the box the tilted region
+    // needs and ask each pixel whether it lands inside the upright one.
+    let Turn { angle, centre } = turn;
     let Some((x0, y0, x1, y1)) = clamp_region(img, a, b) else {
         return;
     };
+    let (rx0, ry0, rx1, ry1) = (
+        a[0].min(b[0]),
+        a[1].min(b[1]),
+        a[0].max(b[0]),
+        a[1].max(b[1]),
+    );
+    let turned = angle.abs() >= 1e-4;
+    let (x0, y0, x1, y1) = if turned {
+        let Some(swept) = clamp_region(img, [rx0, ry0], [rx1, ry1]).map(|_| {
+            let (sin, cos) = angle.sin_cos();
+            let mut bb = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
+            for (px, py) in [(rx0, ry0), (rx1, ry0), (rx1, ry1), (rx0, ry1)] {
+                let (dx, dy) = (px - centre[0], py - centre[1]);
+                let (qx, qy) = (
+                    centre[0] + dx * cos - dy * sin,
+                    centre[1] + dx * sin + dy * cos,
+                );
+                bb[0] = bb[0].min(qx);
+                bb[1] = bb[1].min(qy);
+                bb[2] = bb[2].max(qx);
+                bb[3] = bb[3].max(qy);
+            }
+            bb
+        }) else {
+            return;
+        };
+        match clamp_region(img, [swept[0], swept[1]], [swept[2], swept[3]]) {
+            Some(r) => r,
+            None => return,
+        }
+    } else {
+        (x0, y0, x1, y1)
+    };
+
+    let (usin, ucos) = (-angle).sin_cos();
     let strength = color[3] as f32 / 255.0;
     for y in y0..y1 {
         for x in x0..x1 {
+            if turned {
+                let (dx, dy) = (x as f32 + 0.5 - centre[0], y as f32 + 0.5 - centre[1]);
+                let ux = centre[0] + dx * ucos - dy * usin;
+                let uy = centre[1] + dx * usin + dy * ucos;
+                if ux < rx0 || ux >= rx1 || uy < ry0 || uy >= ry1 {
+                    continue;
+                }
+            }
             let p = img.get_pixel_mut(x, y);
             let lum = luminance(p.0);
             for (channel, tint) in p.0.iter_mut().zip(color).take(3) {
@@ -329,6 +517,59 @@ fn draw_paint(img: &mut RgbaImage, a: [f32; 2], b: [f32; 2], color: Rgba8) {
             }
         }
     }
+}
+
+/// A label, turned about the point it was placed at.
+///
+/// Glyphs are blitted, not sampled from a field, so the trick used for the
+/// shapes does not apply. Instead the text goes onto a transparent scratch
+/// image which is then turned whole — exactly what `render::watermark` already
+/// does for the wordmark, so the two share one rotation.
+fn draw_text(
+    img: &mut RgbaImage,
+    font: &FontArc,
+    size: f32,
+    at: [f32; 2],
+    color: Rgba<u8>,
+    body: &str,
+    angle: f32,
+) {
+    if angle.abs() < 1e-4 {
+        text::draw(img, font, size, at[0], at[1], color, body);
+        return;
+    }
+    let w = text::measure(font, size, body);
+    // `measure` answers width only; a line is about 1.35 em tall with its
+    // descenders, and the scratch image is padded generously anyway.
+    let h = size * 1.35;
+    if w < 1.0 {
+        return;
+    }
+    // A margin, so the turned corners are not shaved off the scratch image.
+    let pad = size;
+    let mut stamp = RgbaImage::from_pixel(
+        (w + pad * 2.0).ceil() as u32,
+        (h + pad * 2.0).ceil() as u32,
+        Rgba([0, 0, 0, 0]),
+    );
+    text::draw(&mut stamp, font, size, pad, pad, color, body);
+    let turned = crate::render::watermark::rotate(&stamp, angle);
+
+    // The label turns about its own origin, but `rotate` turns the scratch
+    // image about the *image's* centre. So follow where the origin ended up and
+    // shift the result until it lands back where the label belongs.
+    //
+    // Getting this wrong is not subtle but it is silent: the glyphs tilt
+    // correctly and simply sit somewhere else, which shows up as the selection
+    // frame no longer agreeing with the text it is drawn around.
+    let (sin, cos) = angle.sin_cos();
+    let (sw, sh) = (stamp.width() as f32, stamp.height() as f32);
+    let (tw, th) = (turned.width() as f32, turned.height() as f32);
+    // The origin, as an offset from the scratch image's centre.
+    let (vx, vy) = (pad - sw / 2.0, pad - sh / 2.0);
+    let ox = at[0] - (tw / 2.0 + vx * cos - vy * sin);
+    let oy = at[1] - (th / 2.0 + vx * sin + vy * cos);
+    image::imageops::overlay(img, &turned, ox.round() as i64, oy.round() as i64);
 }
 
 /// Perceptual brightness, 0.0 to 1.0.
@@ -416,6 +657,190 @@ impl History {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn canvas() -> RgbaImage {
+        RgbaImage::from_pixel(200, 200, Rgba([0, 0, 0, 0]))
+    }
+
+    fn ink(img: &RgbaImage) -> Vec<(u32, u32)> {
+        let mut out = Vec::new();
+        for y in 0..img.height() {
+            for x in 0..img.width() {
+                if img.get_pixel(x, y).0[3] > 40 {
+                    out.push((x, y));
+                }
+            }
+        }
+        out
+    }
+
+    fn shape(kind: Tool, angle: f32) -> Layer {
+        let mut l = Layer::new(kind, [60.0, 90.0], [255, 0, 0, 255], 6.0, 30.0, 8.0);
+        l.b = [140.0, 110.0];
+        l.angle = angle;
+        l
+    }
+
+    /// Turning a shape has to move ink, and it has to move it *about the
+    /// centre* — a rotation that also slid the shape sideways would be a
+    /// translation wearing a disguise.
+    #[test]
+    fn turning_a_shape_moves_its_ink_but_not_its_centre() {
+        for kind in [Tool::Rect, Tool::Ellipse, Tool::Arrow] {
+            let mut upright = canvas();
+            let mut turned = canvas();
+            apply(&mut upright, &[shape(kind, 0.0)], 1.0, None);
+            apply(&mut turned, &[shape(kind, std::f32::consts::FRAC_PI_2)], 1.0, None);
+
+            let (u, t) = (ink(&upright), ink(&turned));
+            assert!(!u.is_empty() && !t.is_empty(), "{kind:?} drew nothing at all");
+            assert_ne!(u, t, "{kind:?} ignored its angle");
+
+            // A wide flat shape turned a quarter turn becomes a tall thin one.
+            let span = |p: &[(u32, u32)], f: fn(&(u32, u32)) -> u32| {
+                p.iter().map(f).max().unwrap() - p.iter().map(f).min().unwrap()
+            };
+            assert!(
+                span(&u, |p| p.0) > span(&u, |p| p.1),
+                "{kind:?}: the fixture should start wider than it is tall"
+            );
+            assert!(
+                span(&t, |p| p.1) > span(&t, |p| p.0),
+                "{kind:?}: a quarter turn should leave it taller than it is wide"
+            );
+
+            let mid = |p: &[(u32, u32)], f: fn(&(u32, u32)) -> u32| {
+                (p.iter().map(f).min().unwrap() + p.iter().map(f).max().unwrap()) as i64 / 2
+            };
+            assert!(
+                (mid(&u, |p| p.0) - mid(&t, |p| p.0)).abs() <= 3
+                    && (mid(&u, |p| p.1) - mid(&t, |p| p.1)).abs() <= 3,
+                "{kind:?} drifted off its centre while turning"
+            );
+        }
+    }
+
+    /// A turn is written to the layer on every frame of the drag, so the
+    /// renderer sees every angle in between — at preview scale, where the
+    /// numbers are smallest and any degenerate case shows up first.
+    #[test]
+    fn every_angle_renders_at_every_scale() {
+        let font = crate::render::text::load_system_font().map(|(_, f)| f);
+        for kind in [Tool::Arrow, Tool::Rect, Tool::Ellipse, Tool::Text, Tool::Highlight] {
+            for steps in 0..24 {
+                let angle = steps as f32 / 24.0 * std::f32::consts::TAU - std::f32::consts::PI;
+                for scale in [0.12_f32, 0.5, 1.0] {
+                    let mut img = RgbaImage::from_pixel(120, 90, Rgba([0, 0, 0, 255]));
+                    let mut l = shape(kind, angle);
+                    l.text = "xin chào".to_owned();
+                    apply(&mut img, &[l], scale, font.as_ref());
+                }
+            }
+        }
+    }
+
+    /// A label turns about the point it was placed at, so however far it is
+    /// turned its ink stays the same distance from that point. The scratch
+    /// image it is rotated on has its own centre, and lining the two up is easy
+    /// to get wrong in a way that tilts the glyphs correctly and puts them
+    /// somewhere else entirely.
+    #[test]
+    fn a_turned_label_stays_anchored_to_where_it_was_placed() {
+        let Some((_, font)) = crate::render::text::load_system_font() else {
+            return; // no system font on this machine; the renderer skips text too
+        };
+        let at = [100.0_f32, 100.0];
+        let mut reach = Vec::new();
+        for steps in 0..8 {
+            let angle = steps as f32 / 8.0 * std::f32::consts::TAU;
+            let mut img = RgbaImage::from_pixel(200, 200, Rgba([0, 0, 0, 0]));
+            let mut l = Layer::new(Tool::Text, at, [255, 0, 0, 255], 2.0, 20.0, 8.0);
+            l.text = "anchor".to_owned();
+            l.angle = angle;
+            apply(&mut img, &[l], 1.0, Some(&font));
+
+            let lit = ink(&img);
+            assert!(!lit.is_empty(), "nothing drawn at {angle:.2} rad");
+            let cx = lit.iter().map(|p| p.0 as f32).sum::<f32>() / lit.len() as f32;
+            let cy = lit.iter().map(|p| p.1 as f32).sum::<f32>() / lit.len() as f32;
+            reach.push(((cx - at[0]).powi(2) + (cy - at[1]).powi(2)).sqrt());
+        }
+        let (lo, hi) = (
+            reach.iter().cloned().fold(f32::MAX, f32::min),
+            reach.iter().cloned().fold(0.0_f32, f32::max),
+        );
+        assert!(
+            hi - lo < 6.0,
+            "the label drifts as it turns: its ink sits {lo:.0}..{hi:.0}px from \
+             the point it was placed at, so it is not turning about that point"
+        );
+    }
+
+    /// The arrowhead has a floor so a hairline arrow still reads as an arrow,
+    /// and that floor is 10 *shot* pixels. It used to be 10 pixels of whatever
+    /// bitmap was being drawn into, which is not the same thing: the preview is
+    /// drawn at a fraction of full size, so it grew a head the export never got.
+    #[test]
+    fn the_arrowhead_is_the_same_size_in_the_preview_and_the_export() {
+        let head_spread = |scale: f32, side: u32| {
+            let mut img = RgbaImage::from_pixel(side, side, Rgba([0, 0, 0, 0]));
+            let mut l = Layer::new(Tool::Arrow, [10.0, 100.0], [255, 0, 0, 255], 1.0, 20.0, 8.0);
+            l.b = [190.0, 100.0];
+            apply(&mut img, &[l], scale, None);
+            let lit = ink(&img);
+            let ys: Vec<u32> = lit.iter().map(|p| p.1).collect();
+            // A horizontal arrow is one pixel tall but for its head, so the
+            // vertical spread is the head and nothing else.
+            (ys.iter().max().copied().unwrap_or(0) - ys.iter().min().copied().unwrap_or(0)) as f32
+        };
+
+        let full = head_spread(1.0, 200);
+        let half = head_spread(0.5, 100);
+        assert!(full > 4.0 && half > 2.0, "the arrow drew no head at all");
+        let ratio = full / half;
+        assert!(
+            (ratio - 2.0).abs() < 0.3,
+            "the head is {full}px at full size and {half}px at half — {ratio:.2}× apart \
+             rather than 2×, so the preview and the export disagree about the arrow"
+        );
+    }
+
+    /// Blur and Fill hide information rather than decorate it, so they stay
+    /// square however the angle is set — there is nothing to gain from a
+    /// tilted redaction box, and a great deal of code to go wrong.
+    #[test]
+    fn the_covering_tools_ignore_the_angle() {
+        assert!(!Layer::turnable(Tool::Blur));
+        assert!(!Layer::turnable(Tool::Fill));
+        assert!(Layer::turnable(Tool::Rect));
+        assert!(Layer::turnable(Tool::Text));
+
+        let mut square = canvas();
+        let mut asked = canvas();
+        apply(&mut square, &[shape(Tool::Fill, 0.0)], 1.0, None);
+        apply(&mut asked, &[shape(Tool::Fill, 0.9)], 1.0, None);
+        assert_eq!(
+            ink(&square),
+            ink(&asked),
+            "a redaction box tilted, which it must never do"
+        );
+    }
+
+    /// Hit-testing has to undo the rotation, or a turned shape can only be
+    /// grabbed where it used to be.
+    #[test]
+    fn a_turned_shape_is_grabbed_where_it_now_sits() {
+        let quarter = std::f32::consts::FRAC_PI_2;
+        let turned = shape(Tool::Rect, quarter);
+        let c = turned.centre();
+        // The upright shape is wide and flat, so a point far out to the side is
+        // inside it; once turned a quarter, that point should be outside and
+        // the same distance *above* the centre should be inside.
+        assert!(shape(Tool::Rect, 0.0).hit(c[0] + 35.0, c[1]));
+        assert!(!turned.hit(c[0] + 35.0, c[1]), "grabbed where it no longer is");
+        assert!(turned.hit(c[0], c[1] + 35.0), "cannot be grabbed where it now sits");
+    }
+
 
     fn layer(kind: Tool, a: [f32; 2], b: [f32; 2]) -> Layer {
         let mut l = Layer::new(kind, a, [255, 0, 0, 255], 4.0, 32.0, 8.0);

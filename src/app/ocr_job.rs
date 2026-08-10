@@ -151,6 +151,16 @@ impl ShotrApp {
     /// Redaction boxes followed by the user's own annotation layers, which is
     /// the order they must be drawn in — an arrow should sit on top of a box.
     pub(crate) fn all_layers(&self) -> Vec<Layer> {
+        self.layers_except(None)
+    }
+
+    /// The same, minus one annotation.
+    ///
+    /// A shape being dragged is drawn as a vector at the pointer instead, so
+    /// the preview bitmap must not also carry it at the place it started —
+    /// otherwise the move shows a ghost sitting still behind the one that is
+    /// following the mouse. The export never skips anything.
+    pub(crate) fn layers_except(&self, skip: Option<usize>) -> Vec<Layer> {
         let mut out = Vec::new();
 
         if self.prefs.redact {
@@ -168,7 +178,7 @@ impl ShotrApp {
             }
         }
 
-        out.extend(self.layers.iter().cloned());
+        out.extend(annotations_except(&self.layers, skip));
         out
     }
 
@@ -269,6 +279,20 @@ fn spawn(ctx: egui::Context, job: impl FnOnce() -> Outcome + Send + 'static) -> 
     rx
 }
 
+/// The user's annotations with one left out.
+///
+/// `skip` indexes the *annotation* list, not the combined output: redaction
+/// boxes are prepended by the caller, so filtering the finished vector by the
+/// same number would drop a redaction and leave the dragged shape behind.
+fn annotations_except(layers: &[Layer], skip: Option<usize>) -> Vec<Layer> {
+    layers
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| Some(*i) != skip)
+        .map(|(_, l)| l.clone())
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -278,6 +302,46 @@ mod tests {
             text: text.into(),
             rect: [x, y, x + 40.0, y + 12.0],
         }
+    }
+
+    fn shape(x: f32) -> Layer {
+        let mut l = Layer::new(Tool::Rect, [x, 0.0], [255, 0, 0, 255], 2.0, 20.0, 8.0);
+        l.b = [x + 10.0, 10.0];
+        l
+    }
+
+    /// While a shape is dragged it is drawn as a vector at the pointer, so the
+    /// preview bitmap has to leave it out — otherwise a ghost sits still at the
+    /// old spot behind the one following the mouse.
+    #[test]
+    fn the_dragged_annotation_is_the_only_one_left_out() {
+        let layers = vec![shape(0.0), shape(100.0), shape(200.0)];
+        let kept = annotations_except(&layers, Some(1));
+        assert_eq!(kept.len(), 2, "exactly one annotation should be missing");
+        assert_eq!(kept[0].a[0], 0.0);
+        assert_eq!(kept[1].a[0], 200.0, "the wrong annotation was dropped");
+
+        assert_eq!(
+            annotations_except(&layers, None).len(),
+            3,
+            "nothing may be dropped when nothing is being dragged — this is the \
+             path the export takes"
+        );
+    }
+
+    /// `skip` counts annotations, not the finished list.
+    ///
+    /// Redaction boxes are prepended, so filtering the combined vector by the
+    /// same number would remove a redaction and leave the dragged shape in.
+    #[test]
+    fn the_skip_index_is_not_confused_by_redaction_boxes() {
+        let layers = vec![shape(0.0), shape(100.0)];
+        let kept = annotations_except(&layers, Some(0));
+        assert_eq!(kept.len(), 1);
+        assert_eq!(
+            kept[0].a[0], 100.0,
+            "index 0 must mean the first annotation, whatever is prepended later"
+        );
     }
 
     #[test]

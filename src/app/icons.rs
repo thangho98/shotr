@@ -28,6 +28,8 @@ pub enum Glyph {
     Redo,
     /// The "more" affordance: three dots.
     More,
+    /// Delete the selected annotation.
+    Trash,
     /// The window controls. `cfg`-ed away on macOS, which draws Apple's
     /// coloured lights instead and must not be able to reach for these.
     #[cfg(not(target_os = "macos"))]
@@ -70,6 +72,16 @@ pub fn draw_glyph(painter: &egui::Painter, rect: egui::Rect, glyph: Glyph, color
             for x in [0.12_f32, 0.5, 0.88] {
                 painter.circle_filled(at(x, 0.5), w * 0.9, color);
             }
+        }
+        Glyph::Trash => {
+            // Lid, then a tapering body: enough to read as a bin at 12pt.
+            painter.line_segment([at(0.0, 0.22), at(1.0, 0.22)], stroke);
+            painter.line_segment([at(0.36, 0.22), at(0.42, 0.06)], stroke);
+            painter.line_segment([at(0.42, 0.06), at(0.58, 0.06)], stroke);
+            painter.line_segment([at(0.58, 0.06), at(0.64, 0.22)], stroke);
+            painter.line_segment([at(0.14, 0.22), at(0.24, 1.0)], stroke);
+            painter.line_segment([at(0.86, 0.22), at(0.76, 1.0)], stroke);
+            painter.line_segment([at(0.24, 1.0), at(0.76, 1.0)], stroke);
         }
         #[cfg(not(target_os = "macos"))]
         Glyph::Close => {
@@ -178,7 +190,9 @@ pub fn tool_button(
                 rect.right_bottom() - egui::vec2(3.0, 1.0),
                 egui::Align2::RIGHT_BOTTOM,
                 digit,
-                egui::FontId::monospace(9.0),
+                // `\`` is a small mark that sits high in its em box; at the
+                // digits' size it reads as a speck rather than a key name.
+                egui::FontId::monospace(if digit.is_ascii_digit() { 9.0 } else { 12.0 }),
                 if selected {
                     super::theme::ACCENT
                 } else {
@@ -325,6 +339,7 @@ mod tests {
                 Glyph::Undo,
                 Glyph::Redo,
                 Glyph::More,
+                Glyph::Trash,
                 #[cfg(not(target_os = "macos"))]
                 Glyph::Close,
                 #[cfg(not(target_os = "macos"))]

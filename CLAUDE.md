@@ -406,6 +406,37 @@ because `Painter::image` records only the texture *id* and egui uploads that
 id's delta before it draws the frame's shapes. A test drives a real `Context` to
 pin that, because an egui upgrade could take it away with no error anywhere.
 
+**Nothing that follows the pointer may set `dirty`.** One preview render costs
+275ms at the default look and up to 2s with a big shadow — measured with
+`examples/render_demo` on an 8.6Mpx shot — so a gesture that re-bakes the bitmap
+per frame is a slideshow, and turning a shape was exactly that. The way out is
+the same one moving already used: `detached_layer` lifts the shape out of the
+bitmap for the length of the gesture and the vector overlay draws it, so nothing
+re-renders until the button comes up. `detached_wanted` is the single place that
+decides, which is why the rule is easy to break — a new gesture has to be added
+to it, and forgetting looks like a performance problem rather than a missing
+line.
+
+That overlay is a *stand-in*, and every tool it stands in for has to be drawn
+there too. Rotation caught two that were not: the highlight went through
+`rect_filled`, which cannot tilt, and a label through `Painter::text`, which has
+no angle — both stayed upright under a dashed frame that turned. `TextShape` has
+an `angle`, and it pivots about `pos`, which is where `Layer::centre` puts a
+label's origin, so the two agree with no correction. And the stand-in must match
+the final pixel for pixel: the paint tool was previewed at a fixed 35% alpha
+while the renderer honours the layer's own, so every stroke faded in and then
+jumped solid on release.
+
+The arrow is the tool that shows this up worst, because *three* things have to
+agree. `rasterise` unions three capsules, so every end and the joint at the tip
+is round, while `line_segment` has butt caps and no joint — the arrow snapped
+from soft to hard on mouse-up until the overlay grew a circle at each of the
+four endpoints. And the head's minimum length was written `max(10.0)` in the
+pixels being drawn into, which is 10 preview pixels in the preview and 10
+export pixels in the export: the same arrow had two different heads, and no
+overlay could have matched both. It is `max(10.0 * scale)` now, and a test
+renders one arrow at two scales and fails if the head does not scale with it.
+
 **Desktop entries need absolute paths.** The graphical session's `PATH` does not
 include `~/.local/bin`, so a bare `Exec=shotr` resolves in a terminal and fails
 silently from the launcher.
@@ -421,6 +452,82 @@ this" rather than "free" — the difference is not pedantry, because on the
 machine this was measured on `⌘⇧4` read as disabled in the plist while Shottr
 held it. One more: a press delivers `Pressed` *and* `Released`, so a handler
 that does not filter captures twice.
+
+**Selection is invisible unless the editor says so, and it said the wrong
+thing.** Clicking a shape with the Select tool selects it, dragging moves it and
+Backspace deletes it — all of which worked, and none of which was discoverable:
+the status line for Select advertised "double-click the image to copy and
+close", the delete control had moved into the `⋯` menu, and the only feedback
+was a thin outline. Reported as annotations not being selectable at all. The
+line now describes selecting, and the tool bar grows a delete button while
+something is selected — which is also the only confirmation that anything *is*
+selected. Select sits on the key left of `1` rather than on `7`: it is returned
+to far more often than any one drawing tool.
+
+**The selection is a dashed box, and two cleverer versions were tried first.**
+Tracing each shape's own silhouette worked for a rectangle and fell apart on an
+arrow: the rails ran too close to the shaft and blended into one pink line,
+while the head was left as loose strokes joined to nothing. Drawing a fatter
+copy of the shape *under* the ink traces any silhouette for free — but it means
+redrawing the ink on top, and the vector stand-in is not faithful for every
+tool, so a selected Blur would show as a flat box instead of blurred pixels. A
+dashed rectangle says "this one is selected" without pretending to be part of
+the picture, and it is the same mark for every tool.
+
+**Rotation was cheap because every shape is a distance field.** `rasterise`
+samples an SDF per pixel, so turning a shape is nothing but turning the *sample
+point* back into the shape's upright frame and widening the box that gets swept
+— `rasterise_turned`. No shape needed geometry of its own rewritten, which is
+the whole reason an arrow, a rectangle and an ellipse all learned to rotate in
+one change.
+
+Two do not go through it. **Paint** blends rather than stamping, so it sweeps
+the turned box itself and tests each pixel against the upright rectangle.
+**Text** blits glyphs: it renders onto a transparent scratch image and hands
+that to `render::watermark::rotate`, the same rotation the wordmark uses.
+
+That last one hides a trap worth knowing about. A label turns about the point it
+was *placed* at, but `rotate` turns the scratch image about the *image's*
+centre, so the result has to be shifted back by following where the origin
+ended up. Get it wrong and the glyphs still tilt perfectly — they simply sit
+somewhere else, which shows up only as the selection frame no longer agreeing
+with the text inside it. A test pins the label's ink to a constant distance
+from its anchor through a full turn.
+
+**Blur and Fill deliberately cannot be turned.** They cover information rather
+than decorate it, and there is nothing to gain from a tilted redaction box
+against a good deal of code that could go wrong. `Layer::turnable` is the one
+place that says so, and the editor offers no handle for them.
+
+**`Layer::b` is unused for text, and that made labels almost unselectable.**
+Every other annotation is two corners, so `Layer::bounds` can answer "what area
+is this?" from the struct alone. A label is an origin and a string: `b` is left
+equal to `a`, so `bounds` returned a square of `2 × font_size` around the point
+first clicked — the *start* of the text. A 21-character label at size 34 is
+~280px wide and only its first 68 could be clicked. Hit-testing therefore
+measures the string instead, which is why it needs a `Painter` passed in.
+`font_size` is already in shot pixels, so laying the text out at that size gives
+an extent in the units the layer is stored in, with no conversion.
+
+**Moving takes the layer out of the bitmap rather than re-rendering per frame.**
+It used to translate only on mouse-up, so the outline travelled and the shape
+jumped at the end. For the length of the drag the layer is dropped from the
+preview — [`ShotrApp::layers_except`] — and drawn as a vector at the pointer:
+two renders per gesture instead of one per frame, which was measured at ~7fps.
+Note the index it skips counts *annotations*, not the combined list: redaction
+boxes are prepended, so filtering the finished vector by the same number would
+drop a redaction and leave the dragged shape behind.
+
+That gesture is now refused on top of a shape. Poking at an annotation twice is
+the most natural thing to try, and it used to copy and shut the window before
+the outline could be noticed; on bare canvas it still copies and closes.
+
+**A status message must expire, because it shares a line with the help.** The
+status line carries both news ("Saved: …") and the explanation of the tool in
+hand. `open_image` sets a message and nothing ever cleared it, so the help never
+appeared for the whole session. Messages now hold the line for
+[`STATUS_SECONDS`] and then hand it back; the expiry is driven by comparing the
+text rather than by touching all twenty assignment sites.
 
 **A capture that opens no window has to say so.** `--capture --copy` renders to
 the clipboard and exits, which looks exactly like a hotkey that never fired —

@@ -195,6 +195,9 @@ impl ShotrApp {
         }
         let avail = ui.available_size();
         let (canvas, resp) = ui.allocate_exact_size(avail, egui::Sense::click_and_drag());
+        // Cloned up front: hit-testing a label needs to lay its glyphs out, and
+        // that has to happen while `self` is borrowed mutably below.
+        let ui_painter = ui.painter().clone();
 
         // While a label is being typed the canvas owns the keyboard. Otherwise
         // a stray earlier click in the watermark or preset field leaves that
@@ -246,7 +249,8 @@ impl ShotrApp {
         };
 
         if self.ocr_mode == OcrMode::Off {
-            self.annotation_input(&resp, &to_shot);
+            self.annotation_input(&resp, &to_shot, &to_screen, &ui_painter);
+            self.sync_detached();
             self.paint_annotation_overlay(ui.painter(), &to_screen);
         } else {
             self.ocr_input(&resp, &to_shot);
@@ -272,8 +276,20 @@ impl ShotrApp {
 
         // Only the Select tool gets the copy-and-close gesture; with a drawing
         // tool active a double click is two shapes, not a shortcut.
+        //
+        // And never when the double click landed *on* an annotation. There it
+        // means "I am trying to do something with this shape" — poking at one
+        // twice is the most natural thing to try — and closing the whole editor
+        // is the last thing that should happen. It also made selection look
+        // broken: the window vanished before the outline could be noticed.
         if self.tool == Tool::Select && resp.double_clicked() {
-            self.copy_and_close(ctx);
+            let on_a_shape = resp
+                .interact_pointer_pos()
+                .and_then(|p| layer_at(&ui_painter, &self.layers, to_shot(p)))
+                .is_some();
+            if !on_a_shape {
+                self.copy_and_close(ctx);
+            }
         }
     }
 
@@ -451,9 +467,11 @@ impl ShotrApp {
         &mut self,
         resp: &egui::Response,
         to_shot: &dyn Fn(egui::Pos2) -> [f32; 2],
+        to_screen: &dyn Fn([f32; 2]) -> egui::Pos2,
+        painter: &egui::Painter,
     ) {
         match self.tool {
-            Tool::Select => self.select_layer_input(resp, to_shot),
+            Tool::Select => self.select_layer_input(resp, to_shot, to_screen, painter),
             Tool::Text => {
                 if resp.clicked()
                     && let Some(p) = resp.interact_pointer_pos()
@@ -463,10 +481,9 @@ impl ShotrApp {
                     // second one on top of it.
                     self.finish_text_edit();
                     let at = to_shot(p);
-                    let existing = self
-                        .layers
-                        .iter()
-                        .rposition(|l| l.kind == Tool::Text && l.hit(at[0], at[1]));
+                    let existing = self.layers.iter().rposition(|l| {
+                        l.kind == Tool::Text && contains(painter, l, at)
+                    });
                     match existing {
                         Some(i) => {
                             self.undo.push(&self.layers);
@@ -635,44 +652,127 @@ impl ShotrApp {
         &mut self,
         resp: &egui::Response,
         to_shot: &dyn Fn(egui::Pos2) -> [f32; 2],
+        to_screen: &dyn Fn([f32; 2]) -> egui::Pos2,
+        painter: &egui::Painter,
     ) {
         if resp.clicked()
             && let Some(p) = resp.interact_pointer_pos()
         {
-            let [sx, sy] = to_shot(p);
-            // Topmost first: later layers are drawn on top.
-            self.selected_layer = self.layers.iter().rposition(|l| l.hit(sx, sy));
+            self.selected_layer = layer_at(painter, &self.layers, to_shot(p));
         }
 
         if resp.drag_started()
             && let Some(p) = resp.interact_pointer_pos()
         {
-            let [sx, sy] = to_shot(p);
-            self.selected_layer = self.layers.iter().rposition(|l| l.hit(sx, sy));
-            self.move_delta = self.selected_layer.map(|_| [0.0, 0.0]);
-            self.drag_anchor = Some([sx, sy]);
+            // The knob wins over the shape under it: it is deliberately outside
+            // the frame, but a small shape leaves the two close together.
+            self.turn_from = self.grabbed_handle(painter, p, to_screen);
+            if self.turn_from.is_some() {
+                // A turn writes itself onto the layer frame by frame, so the
+                // only moment there is still an old angle to keep is this one.
+                self.undo.push(&self.layers);
+            } else {
+                let at = to_shot(p);
+                self.selected_layer = layer_at(painter, &self.layers, at);
+                self.move_delta = self.selected_layer.map(|_| [0.0, 0.0]);
+                self.drag_anchor = Some(at);
+            }
         }
         if resp.dragged()
             && let Some(p) = resp.interact_pointer_pos()
-            && let Some(anchor) = self.drag_anchor
         {
-            let [sx, sy] = to_shot(p);
-            self.move_delta = Some([sx - anchor[0], sy - anchor[1]]);
+            if let (Some(grab), Some(i)) = (self.turn_from, self.selected_layer) {
+                let at = to_shot(p);
+                if let Some(layer) = self.layers.get_mut(i) {
+                    let c = layer.centre();
+                    let now = (at[1] - c[1]).atan2(at[0] - c[0]);
+                    layer.angle = now - grab;
+                    // No `dirty` here: the shape is out of the bitmap for the
+                    // length of the turn and the overlay is drawing it.
+                }
+            } else if let Some(anchor) = self.drag_anchor {
+                let [sx, sy] = to_shot(p);
+                self.move_delta = Some([sx - anchor[0], sy - anchor[1]]);
+            }
         }
         if resp.drag_stopped() {
-            // Re-render once, at the end — moving is previewed with a ghost
-            // outline rather than re-running the pipeline every frame.
+            // A turn is written straight onto the layer as it happens, so
+            // there is nothing to commit here beyond ending the gesture.
+            if self.turn_from.take().is_some() {
+                self.move_delta = None;
+                self.drag_anchor = None;
+                return;
+            }
             if let (Some(i), Some(d)) = (self.selected_layer, self.move_delta)
                 && (d[0].abs() > 0.5 || d[1].abs() > 0.5)
                 && i < self.layers.len()
             {
                 self.undo.push(&self.layers);
                 self.layers[i].translate(d[0], d[1]);
-                self.dirty = true;
             }
             self.move_delta = None;
             self.drag_anchor = None;
         }
+    }
+
+    /// Decide which annotation the overlay owns, and re-render if that changed.
+    ///
+    /// Kept in one place rather than set at each drag edge: selecting,
+    /// deselecting, deleting, undoing and dropping a drag all have to agree
+    /// with the bitmap, and every one of them used to be its own chance to
+    /// leave a shape invisible or doubled.
+    fn sync_detached(&mut self) {
+        let wanted = self.detached_wanted();
+        if self.detached_layer != wanted {
+            self.detached_layer = wanted;
+            self.dirty = true;
+        }
+    }
+
+    fn detached_wanted(&self) -> Option<usize> {
+        if self.tool != Tool::Select {
+            return None;
+        }
+        let i = self.selected_layer?;
+        let kind = self.layers.get(i)?.kind;
+        let _ = kind;
+        // Only while it is being dragged or turned. Selection alone leaves the
+        // shape in the bitmap, because the vector stand-in is not faithful for
+        // every tool — a detached Blur would show as a flat box rather than as
+        // blurred pixels — and the frame is drawn around it either way.
+        //
+        // Turning has to be in here as much as moving does: the render pipeline
+        // costs 200–600ms for one preview of this size, so re-rendering per
+        // frame turns a drag into a slideshow. Measured with
+        // `examples/render_demo`.
+        (self.drag_anchor.is_some() || self.turn_from.is_some()).then_some(i)
+    }
+
+    /// The angle the pointer sits at, if a drag started on the rotate knob.
+    ///
+    /// Returned relative to the shape's current angle, so the knob does not
+    /// jump to the pointer the moment it is grabbed.
+    fn grabbed_handle(
+        &self,
+        painter: &egui::Painter,
+        p: egui::Pos2,
+        to_screen: &dyn Fn([f32; 2]) -> egui::Pos2,
+    ) -> Option<f32> {
+        if self.tool != Tool::Select {
+            return None;
+        }
+        let i = self.selected_layer?;
+        let layer = self.layers.get(i)?;
+        if !Layer::turnable(layer.kind) {
+            return None;
+        }
+        let (_, knob) = turn_handle(painter, layer, to_screen);
+        // Generous: the knob is 5px and nobody aims at 5px.
+        if (p - knob).length() > TURN_KNOB + 8.0 {
+            return None;
+        }
+        let c = to_screen(layer.centre());
+        Some((p.y - c.y).atan2(p.x - c.x) - layer.angle)
     }
 
     fn paint_annotation_overlay(
@@ -689,25 +789,234 @@ impl ShotrApp {
         }
 
         // Only in Select mode. The selection survives a draw so the sidebar can
-        // edit the new layer, but showing its box while a drawing tool is in
-        // hand just litters the preview with outlines you cannot act on.
+        // edit the new layer, but showing its outline while a drawing tool is
+        // in hand just litters the preview with marks you cannot act on.
         if self.tool == Tool::Select
             && let Some(i) = self.selected_layer
             && let Some(layer) = self.layers.get(i)
         {
             let d = self.move_delta.unwrap_or([0.0, 0.0]);
-            let [x0, y0, x1, y1] = layer.bounds();
-            let rect = egui::Rect::from_two_pos(
-                to_screen([x0 + d[0], y0 + d[1]]),
-                to_screen([x1 + d[0], y1 + d[1]]),
-            );
-            draw_border(
-                painter,
-                rect,
-                egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(0x4a, 0x9e, 0xff)),
-            );
+            let moved = shifted(layer, d);
+            // Ramp the halo in, so a selection announces itself instead of
+            // snapping into place.
+            let fade = painter
+                .ctx()
+                .animate_bool_with_time(egui::Id::new(("selected", i)), true, 0.10);
+
+            // While it is out of the bitmap the overlay *is* the annotation.
+            if self.detached_layer == Some(i) {
+                if moved.kind == Tool::Text {
+                    paint_text_layer(painter, &moved, to_screen);
+                } else {
+                    paint_layer_preview(painter, &moved, to_screen);
+                }
+            }
+            paint_selection(painter, &moved, to_screen, fade);
         }
     }
+}
+
+/// A copy of `layer` shifted by `d`, for previewing a move without touching
+/// the real one until the button comes up.
+fn shifted(layer: &Layer, d: [f32; 2]) -> Layer {
+    let mut moved = layer.clone();
+    moved.translate(d[0], d[1]);
+    moved
+}
+
+/// The text of a label, drawn where it really sits.
+///
+/// `paint_layer_preview` cannot help here: a label has no geometry to trace,
+/// only glyphs, and while it is being moved the overlay is the only copy of it
+/// on screen.
+fn paint_text_layer(
+    painter: &egui::Painter,
+    layer: &Layer,
+    to_screen: &dyn Fn([f32; 2]) -> egui::Pos2,
+) {
+    let c = layer.color;
+    let color = egui::Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3]);
+    let galley = painter.layout_no_wrap(layer.text.clone(), text_font(layer, to_screen), color);
+    // `TextShape` turns about `pos`, and `Layer::centre` for a label is its
+    // origin too, so the two agree without a correction.
+    painter.add(
+        egui::epaint::TextShape::new(to_screen(layer.a), galley, color)
+            .with_angle(layer.angle),
+    );
+}
+
+/// The on-screen font for a label, scaled the way the picture is.
+fn text_font(layer: &Layer, to_screen: &dyn Fn([f32; 2]) -> egui::Pos2) -> egui::FontId {
+    let unit = (to_screen([1.0, 0.0]).x - to_screen([0.0, 0.0]).x).abs();
+    egui::FontId::new((layer.font_size * unit).max(6.0), egui::FontFamily::Proportional)
+}
+
+/// The selection frame: a dashed rectangle round the annotation.
+///
+/// Deliberately the same mark for every tool. Two cleverer versions came first
+/// and both were worse — a halo drawn under the ink meant redrawing the ink
+/// here, which the vector stand-in cannot do faithfully for a blur, and tracing
+/// each shape's own silhouette worked for a rectangle but fell apart on an
+/// arrow, whose head left loose strokes joined to nothing. A dashed box says
+/// "this one is selected" without pretending to be part of the picture.
+fn paint_selection(
+    painter: &egui::Painter,
+    layer: &Layer,
+    to_screen: &dyn Fn([f32; 2]) -> egui::Pos2,
+    fade: f32,
+) {
+    if fade <= 0.01 {
+        return;
+    }
+    let accent = crate::app::theme::ACCENT.gamma_multiply(fade);
+    let stroke = egui::Stroke::new(1.5_f32, accent);
+    let rect = selection_rect(painter, layer, to_screen);
+
+    // Dashes are laid along the path from its start, so going round the corners
+    // in one call keeps them evenly spaced all the way round.
+    let turn = |p: egui::Pos2| turn_on_screen(layer, to_screen, p);
+    let corners = [
+        turn(rect.left_top()),
+        turn(rect.right_top()),
+        turn(rect.right_bottom()),
+        turn(rect.left_bottom()),
+        turn(rect.left_top()),
+    ];
+    painter.extend(egui::Shape::dashed_line(&corners, stroke, 6.0, 4.0));
+
+    if Layer::turnable(layer.kind) {
+        let (stem, knob) = turn_handle(painter, layer, to_screen);
+        painter.line_segment([stem, knob], stroke);
+        painter.circle_filled(knob, TURN_KNOB, accent);
+    }
+}
+
+/// The rotate handle: where its stem leaves the frame, and where the knob sits.
+///
+/// Above the frame's top edge, turned with it, so it always reads as "this end
+/// is the top of the shape".
+fn turn_handle(
+    painter: &egui::Painter,
+    layer: &Layer,
+    to_screen: &dyn Fn([f32; 2]) -> egui::Pos2,
+) -> (egui::Pos2, egui::Pos2) {
+    let rect = selection_rect(painter, layer, to_screen);
+    let stem = egui::pos2(rect.center().x, rect.min.y);
+    let knob = egui::pos2(rect.center().x, rect.min.y - TURN_ARM);
+    (
+        turn_on_screen(layer, to_screen, stem),
+        turn_on_screen(layer, to_screen, knob),
+    )
+}
+
+/// Turn a point that was worked out in the shape's upright frame into where it
+/// really lands on screen.
+fn turn_on_screen(
+    layer: &Layer,
+    to_screen: &dyn Fn([f32; 2]) -> egui::Pos2,
+    p: egui::Pos2,
+) -> egui::Pos2 {
+    if layer.angle.abs() < 1e-4 {
+        return p;
+    }
+    let c = to_screen(layer.centre());
+    let (sin, cos) = layer.angle.sin_cos();
+    let (dx, dy) = (p.x - c.x, p.y - c.y);
+    egui::pos2(c.x + dx * cos - dy * sin, c.y + dx * sin + dy * cos)
+}
+
+/// Where the frame sits: the shape's own extent, plus room to clear its stroke.
+fn selection_rect(
+    painter: &egui::Painter,
+    layer: &Layer,
+    to_screen: &dyn Fn([f32; 2]) -> egui::Pos2,
+) -> egui::Rect {
+    let a = to_screen(layer.a);
+    if layer.kind == Tool::Text {
+        let font = text_font(layer, to_screen);
+        let galley = painter.layout_no_wrap(layer.text.clone(), font, egui::Color32::WHITE);
+        return egui::Rect::from_min_size(a, galley.size()).expand(5.0);
+    }
+    let unit = (to_screen([1.0, 0.0]).x - to_screen([0.0, 0.0]).x).abs();
+    let half = (layer.stroke * unit).max(1.0) / 2.0;
+    egui::Rect::from_two_pos(a, to_screen(layer.b)).expand(half + 5.0)
+}
+
+/// The outline of a stroked shape, drawn with whatever stroke is handed in.
+///
+/// One path, used twice: once in the annotation's own colour and once —
+/// underneath and much fatter — as the selection halo. Sharing it is the whole
+/// point, because it means the halo traces the arrowhead and the ellipse for
+/// free instead of each needing its silhouette worked out by hand.
+fn stroke_shape(
+    painter: &egui::Painter,
+    layer: &Layer,
+    to_screen: &dyn Fn([f32; 2]) -> egui::Pos2,
+    stroke: egui::Stroke,
+) {
+    // Built in shot space and turned there, so a rotated shape needs no special
+    // case: `place` is the only thing that knows about the angle.
+    let place = |p: [f32; 2]| to_screen(turn_in_shot(layer, p));
+    let (a, b) = (layer.a, layer.b);
+
+    match layer.kind {
+        Tool::Arrow => {
+            let len = ((b[0] - a[0]).powi(2) + (b[1] - a[1]).powi(2)).sqrt();
+            if len < 1.0 {
+                return;
+            }
+            // The same three lengths `draw_arrow` uses, in the same units.
+            let head = (layer.stroke * 4.0).max(10.0).min(len);
+            let along = (b[1] - a[1]).atan2(b[0] - a[0]);
+            let barb = |sign: f32| {
+                let t = along + std::f32::consts::PI + sign * 0.49;
+                [b[0] + head * t.cos(), b[1] + head * t.sin()]
+            };
+            let (l, r) = (barb(-1.0), barb(1.0));
+            for [from, to] in [[a, b], [b, l], [b, r]] {
+                painter.line_segment([place(from), place(to)], stroke);
+            }
+            // The exporter unions three capsules, so every end and the joint at
+            // the tip is round. `line_segment` has butt caps and no joint, which
+            // is what made the arrow snap from soft to hard on mouse-up.
+            for p in [a, b, l, r] {
+                painter.circle_filled(place(p), stroke.width / 2.0, stroke.color);
+            }
+        }
+        Tool::Rect => {
+            let pts = corners(a, b).map(place).to_vec();
+            painter.add(egui::Shape::closed_line(pts, stroke));
+        }
+        Tool::Ellipse => {
+            let (cx, cy) = ((a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0);
+            let (rx, ry) = ((b[0] - a[0]) / 2.0, (b[1] - a[1]) / 2.0);
+            let pts: Vec<egui::Pos2> = (0..=48)
+                .map(|i| {
+                    let t = i as f32 / 48.0 * std::f32::consts::TAU;
+                    place([cx + rx * t.cos(), cy + ry * t.sin()])
+                })
+                .collect();
+            painter.add(egui::Shape::closed_line(pts, stroke));
+        }
+        _ => {}
+    }
+}
+
+/// The four corners of a rectangle, in order.
+fn corners(a: [f32; 2], b: [f32; 2]) -> [[f32; 2]; 4] {
+    [[a[0], a[1]], [b[0], a[1]], [b[0], b[1]], [a[0], b[1]]]
+}
+
+/// A point in the shape's upright frame, moved to where the angle puts it.
+/// The inverse of [`Layer::unturn`], which hit-testing uses.
+fn turn_in_shot(layer: &Layer, p: [f32; 2]) -> [f32; 2] {
+    if layer.angle.abs() < 1e-4 {
+        return p;
+    }
+    let c = layer.centre();
+    let (sin, cos) = layer.angle.sin_cos();
+    let (dx, dy) = (p[0] - c[0], p[1] - c[1]);
+    [c[0] + dx * cos - dy * sin, c[1] + dx * sin + dy * cos]
 }
 
 /// Vector stand-in for a shape mid-drag. Baking the real thing into the bitmap
@@ -731,32 +1040,17 @@ fn paint_layer_preview(
     let rect = egui::Rect::from_two_pos(a, b);
 
     match layer.kind {
-        Tool::Arrow => {
-            painter.line_segment([a, b], stroke);
-            let angle = (b.y - a.y).atan2(b.x - a.x);
-            let head = (width * 4.0).max(10.0);
-            for sign in [-1.0_f32, 1.0] {
-                let t = angle + std::f32::consts::PI + sign * 0.49;
-                painter.line_segment(
-                    [b, egui::pos2(b.x + head * t.cos(), b.y + head * t.sin())],
-                    stroke,
-                );
-            }
-        }
-        Tool::Rect => draw_border(painter, rect, stroke),
-        Tool::Ellipse => {
-            let centre = rect.center();
-            let (rx, ry) = (rect.width() / 2.0, rect.height() / 2.0);
-            let points: Vec<egui::Pos2> = (0..=48)
-                .map(|i| {
-                    let t = i as f32 / 48.0 * std::f32::consts::TAU;
-                    egui::pos2(centre.x + rx * t.cos(), centre.y + ry * t.sin())
-                })
-                .collect();
-            painter.add(egui::Shape::line(points, stroke));
+        Tool::Arrow | Tool::Rect | Tool::Ellipse => {
+            stroke_shape(painter, layer, to_screen, stroke)
         }
         Tool::Highlight => {
-            painter.rect_filled(rect, 0.0, color.gamma_multiply(0.35));
+            let pts = corners(layer.a, layer.b)
+                .map(|p| to_screen(turn_in_shot(layer, p)))
+                .to_vec();
+            // The paint tool's opacity is the layer's own alpha — a fixed
+            // fraction here made every stroke pale while it was being dragged
+            // and then jump solid the moment the button came up.
+            painter.add(egui::Shape::convex_polygon(pts, color, egui::Stroke::NONE));
         }
         Tool::Blur => {
             draw_border(
@@ -769,6 +1063,9 @@ fn paint_layer_preview(
         Tool::Text | Tool::Select | Tool::Fill => {}
     }
 }
+
+const TURN_ARM: f32 = 26.0;
+const TURN_KNOB: f32 = 5.0;
 
 const REPAINT_BLINK: std::time::Duration = std::time::Duration::from_millis(120);
 
@@ -890,6 +1187,59 @@ fn next_boundary(s: &str, i: usize) -> usize {
     j
 }
 
+/// The topmost annotation under a point, if any.
+///
+/// Later layers are drawn over earlier ones, so the search runs from the back:
+/// clicking where two shapes overlap picks the one you can actually see.
+pub(super) fn layer_at(
+    painter: &egui::Painter,
+    layers: &[Layer],
+    at: [f32; 2],
+) -> Option<usize> {
+    layers
+        .iter()
+        .rposition(|l| contains(painter, l, at))
+}
+
+/// Is `at` inside the area this annotation can be grabbed by?
+fn contains(painter: &egui::Painter, layer: &Layer, at: [f32; 2]) -> bool {
+    let [x0, y0, x1, y1] = hit_bounds(painter, layer);
+    at[0] >= x0 && at[0] <= x1 && at[1] >= y0 && at[1] <= y1
+}
+
+/// The rectangle an annotation can be grabbed by, in shot pixels.
+///
+/// Everything but a label can answer this from its own two corners. A label
+/// cannot: `Layer::b` is unused for text, so `Layer::bounds` returns a square
+/// of `2 × font_size` around the point that was first clicked — the *start* of
+/// the string. A ten-character label at size 34 is some 200px wide and only its
+/// first 34 could be clicked, which is why text was almost impossible to
+/// select. So it gets measured instead.
+///
+/// `font_size` is already in shot pixels, so laying the text out at that size
+/// gives an extent in the same units the layer is stored in — no conversion,
+/// and the same font the exporter will bake.
+fn hit_bounds(painter: &egui::Painter, layer: &Layer) -> [f32; 4] {
+    if layer.kind != Tool::Text {
+        return layer.bounds();
+    }
+    let size = painter
+        .layout_no_wrap(
+            layer.text.clone(),
+            egui::FontId::new(layer.font_size.max(1.0), egui::FontFamily::Proportional),
+            egui::Color32::WHITE,
+        )
+        .size();
+    // A little slack so the very edge of a glyph is still grabbable.
+    let pad = (layer.font_size * 0.3).max(4.0);
+    [
+        layer.a[0] - pad,
+        layer.a[1] - pad,
+        layer.a[0] + size.x + pad,
+        layer.a[1] + size.y + pad,
+    ]
+}
+
 /// Do two `[x0, y0, x1, y1]` boxes overlap at all?
 fn overlaps(a: [f32; 4], b: [f32; 4]) -> bool {
     a[0] < b[2] && a[2] > b[0] && a[1] < b[3] && a[3] > b[1]
@@ -955,6 +1305,37 @@ mod tests {
         egui::Rect::from_min_max(egui::pos2(x0, y0), egui::pos2(x1, y1))
     }
 
+    /// The overlay turns points one way and hit-testing turns them back. If the
+    /// two ever disagree the shape is drawn somewhere you cannot click it.
+    #[test]
+    fn turning_a_point_and_turning_it_back_lands_where_it_started() {
+        let mut layer = Layer::new(Tool::Rect, [20.0, 40.0], [255, 0, 0, 255], 2.0, 20.0, 8.0);
+        layer.b = [120.0, 90.0];
+        layer.angle = 0.7;
+        for p in [[20.0, 40.0], [120.0, 90.0], [0.0, 0.0], [70.0, 65.0]] {
+            let back = layer.unturn(turn_in_shot(&layer, p));
+            assert!(
+                (back[0] - p[0]).abs() < 0.01 && (back[1] - p[1]).abs() < 0.01,
+                "{p:?} came back as {back:?} — the overlay and hit-testing turn by \
+                 different amounts"
+            );
+        }
+    }
+
+    /// The highlight used to be painted with `rect_filled`, which cannot tilt:
+    /// the dashed frame turned and the yellow block underneath stayed upright.
+    #[test]
+    fn a_turned_highlight_is_no_longer_an_upright_rectangle() {
+        let mut layer = Layer::new(Tool::Highlight, [0.0, 0.0], [255, 255, 0, 255], 2.0, 20.0, 8.0);
+        layer.b = [100.0, 40.0];
+        layer.angle = 0.5;
+        let pts = corners(layer.a, layer.b).map(|p| turn_in_shot(&layer, p));
+        assert!(
+            (pts[0][1] - pts[1][1]).abs() > 1.0,
+            "the top edge is still level at {pts:?}, so the fill ignores the angle"
+        );
+    }
+
 
     #[test]
     fn selection_maps_back_to_capture_pixels() {
@@ -963,6 +1344,102 @@ mod tests {
         let sel = r(96.0, 54.0, 480.0, 270.0);
         let got = rect_to_full_px(sel, img_rect, 1920, 1080).unwrap();
         assert_eq!(got, [192, 108, 768, 432]);
+    }
+
+    /// Clicking where two shapes overlap has to pick the one you can see —
+    /// the later layer, which is drawn on top.
+    #[test]
+    fn the_topmost_shape_under_the_pointer_wins() {
+        let mut under = Layer::new(Tool::Rect, [0.0, 0.0], [255, 0, 0, 255], 2.0, 20.0, 8.0);
+        under.b = [100.0, 100.0];
+        let mut over = Layer::new(Tool::Rect, [50.0, 50.0], [0, 255, 0, 255], 2.0, 20.0, 8.0);
+        over.b = [150.0, 150.0];
+        let layers = vec![under, over];
+
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let p = ui.painter().clone();
+            assert_eq!(
+                layer_at(&p, &layers, [75.0, 75.0]),
+                Some(1),
+                "picked the shape underneath, so clicking selects something invisible"
+            );
+            assert_eq!(layer_at(&p, &layers, [10.0, 10.0]), Some(0));
+            assert_eq!(
+                layer_at(&p, &layers, [400.0, 400.0]),
+                None,
+                "empty canvas reported a shape, so double-clicking it would not copy and close"
+            );
+        });
+    }
+
+    /// A label has to be grabbable along its whole length.
+    ///
+    /// `Layer::b` is unused for text, so `bounds` gives a square of
+    /// `2 × font_size` around the point first clicked — the *start* of the
+    /// string. Everything past that was unselectable, which is what "text
+    /// select khó quá" meant.
+    #[test]
+    fn the_whole_label_can_be_grabbed_not_just_its_first_letter() {
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let painter = ui.painter().clone();
+            let mut label = Layer::new(Tool::Text, [100.0, 100.0], [255, 0, 0, 255], 2.0, 34.0, 8.0);
+            label.text = "a fairly long caption".to_owned();
+
+            let [x0, _, x1, y1] = hit_bounds(&painter, &label);
+            let width = x1 - x0;
+            assert!(
+                width > 34.0 * 4.0,
+                "the grab area is {width}px for a 21-character label at size 34 — \
+                 back to a square round the first letter"
+            );
+
+            // The far end of the string, which used to miss entirely.
+            assert!(contains(&painter, &label, [x1 - 6.0, 110.0]));
+            // ...and the line's own height, not a fixed square.
+            assert!(y1 > 100.0 + 34.0);
+            // Well past the end is still empty canvas.
+            assert!(!contains(&painter, &label, [x1 + 60.0, 110.0]));
+        });
+    }
+
+    /// Measuring must not make everything else grabbable from a distance.
+    #[test]
+    fn a_shape_is_still_grabbed_by_its_own_area() {
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let painter = ui.painter().clone();
+            let mut rect = Layer::new(Tool::Rect, [10.0, 10.0], [255, 0, 0, 255], 4.0, 20.0, 8.0);
+            rect.b = [90.0, 60.0];
+            assert!(contains(&painter, &rect, [50.0, 35.0]), "inside the box");
+            assert!(!contains(&painter, &rect, [300.0, 35.0]), "far outside it");
+        });
+    }
+
+    /// The double click that copies and closes must not fire on a shape.
+    ///
+    /// Poking at an annotation twice is the most natural thing to try, and it
+    /// used to shut the editor — which is what "I cannot select annotations"
+    /// looked like from the outside.
+    #[test]
+    fn a_double_click_on_a_shape_is_not_the_copy_and_close_gesture() {
+        let mut shape = Layer::new(Tool::Rect, [10.0, 10.0], [255, 0, 0, 255], 2.0, 20.0, 8.0);
+        shape.b = [90.0, 90.0];
+        let layers = vec![shape];
+
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let p = ui.painter().clone();
+            assert!(
+                layer_at(&p, &layers, [50.0, 50.0]).is_some(),
+                "a double click here would close the editor instead of acting on the shape"
+            );
+            assert!(
+                layer_at(&p, &layers, [500.0, 50.0]).is_none(),
+                "double-clicking bare canvas must still copy and close"
+            );
+        });
     }
 
     #[test]
@@ -1152,6 +1629,46 @@ mod tests {
         let (mut t, mut c, mut p) = ("đ".to_owned(), 1usize, String::new());
         apply_text_events(&mut t, &mut c, &mut p, &[text("x")]);
         assert!(t == "xđ" || t == "đx", "got {t:?}");
+    }
+
+    /// Every tool has to be outlineable, at any scale, including a shape
+    /// dragged out to nothing. A zero-length arrow normalises to NaN, and the
+    /// tessellator answers that with geometry sprayed across the canvas rather
+    /// than with an error.
+    #[test]
+    fn selecting_any_shape_outlines_it_without_producing_nonsense() {
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let painter = ui.painter().clone();
+            for scale in [0.25_f32, 1.0, 4.0] {
+                let to_screen = move |p: [f32; 2]| egui::pos2(p[0] * scale, p[1] * scale);
+                for tool in std::iter::once(Tool::Select).chain(Tool::DRAWABLE) {
+                    for (a, b) in [([10.0, 10.0], [90.0, 70.0]), ([40.0, 40.0], [40.0, 40.0])] {
+                        let mut layer =
+                            Layer::new(tool, a, [255, 0, 0, 255], 6.0, 24.0, 8.0);
+                        layer.b = b;
+                        layer.text = "hi".to_owned();
+                        // Both routes a selection can take.
+                        paint_selection(&painter, &layer, &to_screen, 1.0);
+                        paint_layer_preview(&painter, &layer, &to_screen);
+                    }
+                }
+            }
+        });
+    }
+
+    /// A move is previewed on a copy; the stored annotation must not shift
+    /// until the button comes up, or cancelling would be impossible and undo
+    /// would have nothing coherent to restore.
+    #[test]
+    fn previewing_a_move_leaves_the_stored_shape_alone() {
+        let mut layer = Layer::new(Tool::Rect, [10.0, 10.0], [255, 0, 0, 255], 2.0, 20.0, 8.0);
+        layer.b = [50.0, 40.0];
+        let preview = shifted(&layer, [100.0, 5.0]);
+
+        assert_eq!(layer.a, [10.0, 10.0], "the real annotation moved early");
+        assert_eq!(preview.a, [110.0, 15.0]);
+        assert_eq!(preview.b, [150.0, 45.0], "the whole shape must travel, not just its origin");
     }
 
     /// The bug this was written for: a ctrl+wheel handler that reads

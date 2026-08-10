@@ -22,9 +22,13 @@ use crate::annotate::Tool;
 use crate::export;
 use crate::i18n::{t, tf};
 
-/// The tools the floating pill offers, in order, each with the digit that
+/// The tools the floating pill offers, in order, each with the key that
 /// selects it. Select is last and sits behind a separator: it is the tool you
 /// return to, not one of the six you draw with.
+///
+/// It gets the key *left of* `1` rather than `7` for exactly that reason —
+/// it is reached far more often than any single drawing tool, and `7` is a
+/// stretch from the home position.
 ///
 /// One list, used by the pill, by the keyboard handler and by the shortcut
 /// list in Preferences — so a tool cannot gain a button without gaining a key.
@@ -35,7 +39,7 @@ pub(super) const TOOLS: [(Tool, char); 7] = [
     (Tool::Ellipse, '4'),
     (Tool::Blur, '5'),
     (Tool::Highlight, '6'),
-    (Tool::Select, '7'),
+    (Tool::Select, '`'),
 ];
 
 /// Width of the option controls in the pill, from the design.
@@ -535,13 +539,19 @@ impl ShotrApp {
     /// slightly off to one side.
     fn tool_pill(&mut self, ui: &mut egui::Ui, canvas: egui::Rect) {
         let button = super::icons::BUTTON;
-        let has_options = self.tool != Tool::Select;
+        let drawing = self.tool != Tool::Select;
+        // Select's "option" is the one thing you can do to a chosen shape.
+        // Nothing else in the window says a shape is selected, or that
+        // deleting one is possible at all.
+        let can_delete = !drawing && self.selected_layer.is_some();
 
         // Six drawing tools, a separator, Select — then the options.
         let tools_w = button * 7.0 + SEP_W + theme::PILL_GAP * 7.0 + theme::PILL_PAD * 2.0;
         let options_w = SEP_W + OPT_COLOR_W + OPT_SLIDER_W + theme::PILL_GAP * 3.0;
-        let width = if has_options {
+        let width = if drawing {
             tools_w + options_w
+        } else if can_delete {
+            tools_w + SEP_W + OPT_COLOR_W + theme::PILL_GAP * 2.0
         } else {
             tools_w
         };
@@ -580,9 +590,17 @@ impl ShotrApp {
                 self.tool = tool;
             }
         }
-        if has_options {
+        if drawing {
             separator(&mut ui);
             self.tool_options(&mut ui);
+        } else if can_delete {
+            separator(&mut ui);
+            if super::icons::glyph_button(&mut ui, Glyph::Trash, true, egui::vec2(OPT_COLOR_W, 26.0))
+                .on_hover_text(t("Delete the selected shape  ⌫"))
+                .clicked()
+            {
+                self.delete_selected_layer();
+            }
         }
     }
 
@@ -677,8 +695,19 @@ impl ShotrApp {
         if self.mode == Mode::Edit {
             self.zoom_text(&mut ui);
         }
+
+        let now = ui.ctx().input(|i| i.time);
+        let fresh = !self.status.is_empty() && now < self.status_until;
+        if fresh {
+            // Come back when it expires, or the message stays until something
+            // else happens to ask for a frame.
+            ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(
+                (self.status_until - now).max(0.05),
+            ));
+        }
+        let message = if fresh { self.status.clone() } else { self.hint() };
         ui.label(
-            egui::RichText::new(self.hint())
+            egui::RichText::new(message)
                 .size(11.0)
                 .color(theme::pal().text_dim),
         );
@@ -692,9 +721,6 @@ impl ShotrApp {
     /// double-click-to-copy) had nowhere else to go, so they surface here for
     /// exactly the tool they belong to.
     fn hint(&self) -> String {
-        if !self.status.is_empty() {
-            return self.status.clone();
-        }
         if self.mode != Mode::Edit {
             return String::new();
         }
@@ -702,8 +728,12 @@ impl ShotrApp {
             Tool::Text => t(
                 "Click the image and type. Enter to finish, Esc to cancel. Click existing text to edit it.",
             ),
-            Tool::Select => t("Double-click the image to copy and close"),
-            _ => t("1–7 pick a tool · Esc returns to Select"),
+            // Naming the copy-and-close gesture here was a mistake: it told
+            // the one tool that selects, moves and deletes to advertise the
+            // gesture that shuts the window instead. Reported as annotations
+            // not being selectable at all.
+            Tool::Select => t("Click a shape to select it · drag to move · Backspace deletes"),
+            _ => t("` and 1–6 pick a tool · Esc returns to Select"),
         }
         .to_owned()
     }
@@ -902,15 +932,28 @@ mod tests {
         }
     }
 
-    /// Every tool the pill offers needs a digit, and no digit may be used
-    /// twice — a duplicate would silently make one tool unreachable.
+    /// Every tool the pill offers needs a key, and no key may be used twice —
+    /// a duplicate would silently make one tool unreachable.
     #[test]
-    fn every_tool_has_its_own_digit() {
+    fn every_tool_has_its_own_key() {
         let mut keys: Vec<char> = TOOLS.iter().map(|(_, k)| *k).collect();
         keys.sort_unstable();
         keys.dedup();
-        assert_eq!(keys.len(), TOOLS.len(), "two tools share a digit");
-        assert_eq!(keys, vec!['1', '2', '3', '4', '5', '6', '7']);
+        assert_eq!(keys.len(), TOOLS.len(), "two tools share a key");
+    }
+
+    /// The six drawing tools sit on `1`–`6` in the order they are shown, and
+    /// Select takes the key beside them rather than the far end of the row.
+    #[test]
+    fn the_drawing_tools_run_1_to_6_and_select_sits_next_to_them() {
+        let drawing: Vec<char> = TOOLS[..6].iter().map(|(_, k)| *k).collect();
+        assert_eq!(drawing, vec!['1', '2', '3', '4', '5', '6']);
+        assert_eq!(
+            TOOLS[6],
+            (Tool::Select, '`'),
+            "Select must stay on the key left of 1 — it is reached far more \
+             often than any one drawing tool"
+        );
     }
 
     /// The pill's order is part of the design: the six drawing tools, then

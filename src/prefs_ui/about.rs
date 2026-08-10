@@ -20,7 +20,8 @@ const REPO: &str = "https://github.com/thangho98/shotr";
 
 /// What the editor binds today, taken from the same key handling it uses.
 const KEYS: &[(&str, &str)] = &[
-    ("1 – 7", "Pick a tool"),
+    ("1 – 6", "Pick a drawing tool"),
+    ("`", "Back to the Select tool"),
     ("Esc", "Back to the Select tool, or cancel"),
     ("{mod} + C", "Copy the finished image and close"),
     ("{mod} + S", "Save the finished image"),
