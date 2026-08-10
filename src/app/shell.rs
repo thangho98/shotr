@@ -554,37 +554,18 @@ impl ShotrApp {
     /// width that disagreed with the contents would show as everything sitting
     /// slightly off to one side.
     fn tool_pill(&mut self, ui: &mut egui::Ui, canvas: egui::Rect) {
-        let button = super::icons::BUTTON;
         let drawing = self.tool != Tool::Select;
         // Select's "option" is the one thing you can do to a chosen shape.
         // Nothing else in the window says a shape is selected, or that
         // deleting one is possible at all.
         let can_delete = !drawing && self.selected_layer.is_some();
 
-        // Six drawing tools, a separator, Select — then the options.
-        let tools_w = button * 7.0 + SEP_W + theme::PILL_GAP * 7.0 + theme::PILL_PAD * 2.0;
-        let options_w = SEP_W + OPT_COLOR_W + OPT_SLIDER_W + theme::PILL_GAP * 3.0;
-        let width = if drawing {
-            tools_w + options_w
-        } else if can_delete {
-            tools_w + SEP_W + OPT_COLOR_W + theme::PILL_GAP * 2.0
-        } else {
-            tools_w
-        };
-        let height = button + theme::PILL_PAD * 2.0;
-
-        if tools_w + options_w > canvas.width() - 16.0 {
+        // Hidden on the *widest* form, not the current one: a bar that appeared
+        // and vanished as the tool changed would be worse than a cramped one.
+        if pill_width(true, false) > canvas.width() - 16.0 {
             return;
         }
-        // Anchored on the *widest* the pill can get, not on its current width.
-        // Centring the pill itself would slide all seven buttons sideways the
-        // moment Select drops the options group — 68 px, right under the
-        // pointer that just clicked one of them.
-        let left = canvas.center().x - (tools_w + options_w) / 2.0;
-        let rect = egui::Rect::from_min_size(
-            egui::pos2(left, canvas.min.y + 14.0),
-            egui::vec2(width, height),
-        );
+        let rect = pill_rect(canvas, drawing, can_delete);
         theme::glass(ui.painter(), rect);
 
         let mut ui = ui.new_child(
@@ -835,6 +816,45 @@ fn glyph_button(ui: &mut egui::Ui, glyph: Glyph, enabled: bool) -> egui::Respons
     super::icons::glyph_button(ui, glyph, enabled, egui::vec2(26.0, 24.0))
 }
 
+/// Where the tool pill's backdrop goes: centred on the canvas, at the width it
+/// is actually about to be drawn at.
+///
+/// It used to be anchored on the *widest* form the pill can take, so the seven
+/// tool buttons never moved when Select dropped the options group. That kept the
+/// buttons still and left the bar 72px left of centre in the **resting** state —
+/// Select, nothing chosen — which is the state the editor sits in and therefore
+/// the one you look at. Reported as the toolbar not being centred in the frame,
+/// and it was. The old cost is back with it: switching between Select and a
+/// drawing tool shifts the bar by half the options group.
+///
+/// Pure, and the same function the painter uses, so the test that says "centred"
+/// is testing the placement rather than restating the arithmetic.
+fn pill_rect(canvas: egui::Rect, drawing: bool, can_delete: bool) -> egui::Rect {
+    let width = pill_width(drawing, can_delete);
+    let height = super::icons::BUTTON + theme::PILL_PAD * 2.0;
+    egui::Rect::from_min_size(
+        egui::pos2(canvas.center().x - width / 2.0, canvas.min.y + 14.0),
+        egui::vec2(width, height),
+    )
+}
+
+/// How wide the tool pill needs to be for what it is about to hold: six drawing
+/// tools, a separator and Select, then whatever options the current tool has.
+///
+/// One function, because the backdrop is painted before the widgets that sit on
+/// it: the width that places the glass and the width its contents take have to
+/// come from the same place, or the bar sits off to one side of its own buttons.
+fn pill_width(drawing: bool, can_delete: bool) -> f32 {
+    let tools = super::icons::BUTTON * 7.0 + SEP_W + theme::PILL_GAP * 7.0 + theme::PILL_PAD * 2.0;
+    if drawing {
+        tools + SEP_W + OPT_COLOR_W + OPT_SLIDER_W + theme::PILL_GAP * 3.0
+    } else if can_delete {
+        tools + SEP_W + OPT_COLOR_W + theme::PILL_GAP * 2.0
+    } else {
+        tools
+    }
+}
+
 /// A hairline between groups in a horizontal bar.
 fn separator(ui: &mut egui::Ui) {
     let h = (ui.available_height() - 6.0).max(8.0);
@@ -845,6 +865,54 @@ fn separator(ui: &mut egui::Ui) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The pill is centred in the canvas at every width it can take.
+    ///
+    /// It was anchored on the *widest* form it could take while being drawn at its
+    /// current one, so with the options group absent — Select, nothing chosen,
+    /// which is the state the editor rests in — the bar sat 72 px left of centre.
+    /// Reported as the toolbar not being centred in the frame.
+    ///
+    /// Asserted on `pill_rect` — the function the painter itself calls — so this
+    /// checks the placement rather than restating the arithmetic. Anchoring on any
+    /// width other than the one being drawn fails it.
+    #[test]
+    fn the_tool_pill_is_centred_whatever_it_is_holding() {
+        // A canvas that starts well right of the window's left edge, as the real
+        // one does: the card takes the left of the window, so a pill centred on
+        // the *window* instead would pass a symmetric test and fail this one.
+        let canvas = egui::Rect::from_min_max(egui::pos2(336.0, 60.0), egui::pos2(1280.0, 800.0));
+        for (drawing, can_delete, what) in [
+            (true, false, "a drawing tool, with its options"),
+            (false, true, "Select with a shape chosen, so Delete shows"),
+            (false, false, "Select with nothing chosen — the resting state"),
+        ] {
+            let rect = pill_rect(canvas, drawing, can_delete);
+            assert!(
+                (rect.center().x - canvas.center().x).abs() < 0.01,
+                "{what}: the pill's centre is {}, the canvas's is {}",
+                rect.center().x,
+                canvas.center().x
+            );
+            assert!(
+                rect.width() > 0.0 && rect.height() > 0.0,
+                "{what}: the pill has no area"
+            );
+        }
+    }
+
+    /// Every form of the pill has to be narrower than the one the hide test uses,
+    /// or the bar can vanish for a tool that would in fact have fitted.
+    #[test]
+    fn the_widest_pill_really_is_the_widest() {
+        let widest = pill_width(true, false);
+        for (drawing, can_delete) in [(false, true), (false, false)] {
+            assert!(
+                pill_width(drawing, can_delete) <= widest,
+                "drawing={drawing} can_delete={can_delete} is wider than the form used to hide it"
+            );
+        }
+    }
 
     fn window(w: f32, h: f32) -> Shell {
         layout(egui::Rect::from_min_size(
