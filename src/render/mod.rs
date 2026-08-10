@@ -165,6 +165,21 @@ pub fn render_detailed(scene: &Scene) -> Rendered {
     let radius = px(s.radius, scale);
     let mut inset = px(s.inset, scale);
 
+    // The inset frame's colour, settled before the layout it takes part in.
+    //
+    // It has to be known this early precisely so the frame can be dropped:
+    // `layout` reserves room for it, so a frame with no colour to take must be
+    // gone before the canvas is measured, not merely left unpainted. Detecting
+    // once here also means the decision and the colour can never disagree.
+    let detected = if s.inset_auto_color {
+        frame::border_color(shot, 8)
+    } else {
+        None
+    };
+    if s.inset_only_if_detected && s.inset_auto_color && detected.is_none() {
+        inset = 0;
+    }
+
     // 3. Canvas size and how much the screenshot must shrink to fit it.
     let (cw, ch, shot_fit) = layout(shot.width(), shot.height(), pad, inset, s.ratio, scale);
 
@@ -206,11 +221,7 @@ pub fn render_detailed(scene: &Scene) -> Rendered {
     if inset > 0 {
         // The detected colour makes the frame read as part of the captured
         // window rather than a white band stuck around it.
-        let c = if s.inset_auto_color {
-            frame::border_color(shot, 8).unwrap_or(Rgba(s.inset_color))
-        } else {
-            Rgba(s.inset_color)
-        };
+        let c = detected.unwrap_or(Rgba(s.inset_color));
         for y in 0..ih {
             for x in 0..iw {
                 let cov = rounded_coverage(x, y, iw, ih, radius);
@@ -476,6 +487,94 @@ mod tests {
         let back = out.geom.canvas_to_shot(canvas[0], canvas[1], 1.0);
         assert!((back[0] - 120.0).abs() < 0.01);
         assert!((back[1] - 90.0).abs() < 0.01);
+    }
+
+    /// A screenshot whose edges are not one flat colour — the case where
+    /// detection has nothing to report.
+    fn busy_edged_shot() -> RgbaImage {
+        let mut img = RgbaImage::from_pixel(200, 200, Rgba([255, 255, 255, 255]));
+        for x in 0..200u32 {
+            for y in 0..200u32 {
+                if x < 2 || y < 2 || x > 197 || y > 197 {
+                    let v = ((x * 37 + y * 91) % 255) as u8;
+                    img.put_pixel(x, y, Rgba([v, 255 - v, v / 2, 255]));
+                }
+            }
+        }
+        img
+    }
+
+    /// Asking for the inset to match the window's own background is a request
+    /// for something specific. With nothing to match it used to fall back to a
+    /// flat colour and paint a white band round a shot that never had one, and
+    /// the band could not be got rid of without turning the inset off.
+    ///
+    /// The frame has to be gone from the *layout*, not merely left unpainted:
+    /// `layout` reserves room for it, so a skipped-but-reserved frame would
+    /// leave the canvas the wrong size.
+    #[test]
+    fn the_inset_can_be_dropped_when_no_colour_is_found() {
+        let shot = busy_edged_shot();
+        assert!(
+            frame::border_color(&shot, 8).is_none(),
+            "this fixture is meant to defeat detection, or the test proves nothing"
+        );
+
+        let base = Style {
+            padding: 0,
+            radius: 0,
+            shadow: 0,
+            inset: 20,
+            inset_auto_color: true,
+            ..Default::default()
+        };
+
+        let fell_back = render(&Scene::plain(&shot, &base, 1.0));
+        let dropped = render(&Scene::plain(
+            &shot,
+            &Style {
+                inset_only_if_detected: true,
+                ..base.clone()
+            },
+            1.0,
+        ));
+
+        assert_eq!(
+            (fell_back.width(), fell_back.height()),
+            (240, 240),
+            "the fallback frame should still be taking its 20px on every side"
+        );
+        assert_eq!(
+            (dropped.width(), dropped.height()),
+            (200, 200),
+            "the frame was skipped but its space was still reserved"
+        );
+    }
+
+    /// ...and when a colour *is* there, the setting must change nothing.
+    #[test]
+    fn a_detected_colour_keeps_the_inset() {
+        let shot = RgbaImage::from_pixel(200, 200, Rgba([10, 20, 30, 255]));
+        let style = Style {
+            padding: 0,
+            radius: 0,
+            shadow: 0,
+            inset: 20,
+            inset_auto_color: true,
+            inset_only_if_detected: true,
+            ..Default::default()
+        };
+        let out = render(&Scene::plain(&shot, &style, 1.0));
+        assert_eq!(
+            (out.width(), out.height()),
+            (240, 240),
+            "the inset went missing even though the shot has a flat border to match"
+        );
+        assert_eq!(
+            out.get_pixel(2, 2).0,
+            [10, 20, 30, 255],
+            "the frame should be painted in the colour that was detected"
+        );
     }
 
     #[test]

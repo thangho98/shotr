@@ -276,6 +276,17 @@ impl ShotrApp {
                 s.inset_auto_color = true;
             }
         });
+        // Only means anything while the colour is being detected, so it is only
+        // offered then — and only once there is an inset to drop.
+        if s.inset_auto_color && s.inset > 0 {
+            ui.checkbox(
+                &mut s.inset_only_if_detected,
+                t("Only when a colour is found"),
+            )
+            .on_hover_text(t(
+                "Leave the inset off rather than falling back to a plain colour.",
+            ));
+        }
         ui.checkbox(&mut s.balance, t("Balance"))
             .on_hover_text(t("Trim uniform edges so the subject sits centred"));
     }

@@ -76,6 +76,14 @@ pub struct Style {
     /// Tint the inset frame with the screenshot's own background colour when one
     /// can be detected. Falls back to `inset_color` when it cannot.
     pub inset_auto_color: bool,
+    /// Drop the inset frame altogether when [`Self::inset_auto_color`] is on and
+    /// no colour could be found.
+    ///
+    /// Asking for the frame to match the window's own background is a request
+    /// for something specific; with nothing to match, the fallback paints a
+    /// white band round a shot that never had one. Off by default, so a
+    /// style.json written before this existed still renders as it did.
+    pub inset_only_if_detected: bool,
     /// Trim uniform margins off the screenshot so the content sits centred.
     pub balance: bool,
     pub radius: u32,
@@ -114,6 +122,7 @@ impl Default for Style {
             inset: 0,
             inset_color: [0xff, 0xff, 0xff, 0xff],
             inset_auto_color: true,
+            inset_only_if_detected: false,
             balance: false,
             radius: 16,
             shadow: 45,
