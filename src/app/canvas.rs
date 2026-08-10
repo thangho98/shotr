@@ -253,6 +253,23 @@ impl ShotrApp {
             self.paint_ocr_overlay(ui.painter(), &to_screen);
         }
 
+        // Re-render here rather than leaving it to the next frame.
+        //
+        // The bitmap is rebuilt near the top of `ui`, *before* any of this
+        // runs, so a shape finished by the mouse-up just handled is in neither
+        // picture: the draft that was drawing it has been taken, and the
+        // texture does not carry it yet. That frame therefore shows nothing,
+        // and the annotation blinks out for exactly one frame as the button
+        // comes up.
+        //
+        // Doing it now still counts, because the painter above recorded only
+        // the texture *id*: egui uploads the delta for that id before it draws
+        // this frame's shapes, so the pixels arrive in time.
+        if self.dirty {
+            self.rebuild_texture(ctx);
+            self.dirty = false;
+        }
+
         // Only the Select tool gets the copy-and-close gesture; with a drawing
         // tool active a double click is two shapes, not a shortcut.
         if self.tool == Tool::Select && resp.double_clicked() {
@@ -1168,6 +1185,44 @@ mod tests {
             scroll,
             egui::Vec2::ZERO,
             "egui consumes the scroll when zooming — do not read it here"
+        );
+    }
+
+    /// The one-frame blink fix rests entirely on this: a texture set *after*
+    /// the shape that references it has been recorded still reaches the GPU
+    /// for that same frame, because the shape carries only the id.
+    ///
+    /// `edit_central` re-renders after handling input for exactly that reason.
+    /// If an egui upgrade ever deferred the upload by a frame, annotations
+    /// would start blinking out again as the mouse is released — with no error
+    /// anywhere — so the behaviour is pinned here.
+    #[test]
+    fn a_texture_set_after_it_is_painted_still_lands_this_frame() {
+        let ctx = egui::Context::default();
+        let mut tex = ctx.load_texture(
+            "probe",
+            egui::ColorImage::filled([2, 2], egui::Color32::RED),
+            egui::TextureOptions::LINEAR,
+        );
+        // Let the frame that allocates it go by, so what is measured below is
+        // the update and not the creation.
+        let _ = ctx.run_ui(egui::RawInput::default(), |_| {});
+
+        let out = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(8.0, 8.0));
+            let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+            ui.painter().image(tex.id(), rect, uv, egui::Color32::WHITE);
+            // Only now, after the shape above has been recorded.
+            tex.set(
+                egui::ColorImage::filled([2, 2], egui::Color32::BLUE),
+                egui::TextureOptions::LINEAR,
+            );
+        });
+
+        assert!(
+            out.textures_delta.set.iter().any(|(id, _)| *id == tex.id()),
+            "a texture updated after being painted no longer reaches the same frame; \
+             annotations will blink for one frame when the mouse comes up"
         );
     }
 
