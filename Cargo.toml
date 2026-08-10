@@ -52,6 +52,19 @@ winit = "0.30.13"
 [target.'cfg(target_os = "macos")'.dependencies]
 global-hotkey = "0.8.0"
 
+# The "Desktop" background, and only that. macOS keeps no *file* for a dynamic or
+# aerial wallpaper — `System Events` answers `missing value` — so the wallpaper
+# has to be read off the screen instead, and the window to read it from is only
+# reachable through `CGWindowListCopyWindowInfo`. `xcap` cannot help: measured, it
+# filters desktop-level windows out of its list entirely.
+#
+# Not a new build: eframe and arboard already pull both crates in on macOS, so
+# these lines only make a transitive dependency a declared one. MIT, which
+# combines into GPL-3.0. Note this is the window *list*, not
+# `CGWindowListCreateImage` — the obsoleted call the capture path stays away from.
+objc2-core-foundation = "0.3.2"
+objc2-core-graphics = "0.3.2"
+
 [profile.release]
 # The OCR stack (rten) drags in a lot of symbols; stripping roughly halves the
 # installed binary and costs nothing at runtime.

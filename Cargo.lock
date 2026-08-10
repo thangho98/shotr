@@ -4110,6 +4110,8 @@ dependencies = [
  "global-hotkey",
  "image",
  "ksni",
+ "objc2-core-foundation",
+ "objc2-core-graphics",
  "ocrs",
  "regex",
  "rfd",
