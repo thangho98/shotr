@@ -305,7 +305,6 @@ pub struct ShotrApp {
     pub copy_on_finish: bool,
     /// Background colour detected in the current screenshot, for the Inset UI.
     pub(crate) detected_inset: Option<Rgba8>,
-    pub(crate) show_custom_size: bool,
     /// Which sidebar group is unfolded.
     pub(crate) open_section: Option<Section>,
     /// The 1×N ramp the sidebar card is painted with. Built once, on the first
@@ -430,7 +429,6 @@ impl ShotrApp {
             hub: matches!(start, Start::History),
             copy_on_finish: false,
             detected_inset: None,
-            show_custom_size: false,
             turn_from: None,
             detached_layer: None,
             status_shown: String::new(),

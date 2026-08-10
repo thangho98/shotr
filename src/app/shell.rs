@@ -614,8 +614,7 @@ impl ShotrApp {
             self.annot_paint_alpha,
         );
 
-        super::sidebar::color_button(ui, &mut self.annot_color)
-            .on_hover_text(t("Colour"));
+        super::sidebar::color_button(ui, &mut self.annot_color, 24.0).on_hover_text(t("Colour"));
         // The slider shows no number — there is no room for one in the pill —
         // so the tooltip has to, or the only way to read the current value is
         // to change it and watch the picture.

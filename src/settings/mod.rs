@@ -20,7 +20,7 @@ mod watermark;
 pub use prefs::{ExportFormat, Prefs, ThemeMode};
 pub use ratio::{RATIO_PRESETS, Ratio, RatioPreset};
 pub use style::{Background, CustomBg, CustomKind, RedactStyle, Rgba8, Style};
-pub use watermark::{WatermarkPos, WatermarkStyle};
+pub use watermark::WatermarkStyle;
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;

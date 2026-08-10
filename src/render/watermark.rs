@@ -1,57 +1,61 @@
-//! Watermarks: text or logo, placed or tiled.
+//! Watermarks: text or logo, set in a band beneath the shot.
 //!
-//! Everything is built as a small transparent RGBA *stamp* first, then composited
-//! once. That indirection is what makes the variations cheap — opacity, rotation
-//! and tiling all operate on the finished stamp, so they compose freely instead
-//! of each needing its own path through the text renderer.
+//! Everything is built as a small transparent RGBA *stamp*, which the pipeline
+//! then places. That split is deliberate: the stamp belongs to the *shot*, not to
+//! the canvas, so only [`super`] knows where it goes and only it can reserve the
+//! room.
+//!
+//! It used to be an overlay anchored to the canvas on a nine-square grid, with an
+//! option to tile it across the picture. Both are gone. A mark over a screenshot
+//! covers the thing the screenshot was taken for, and every corner of one is
+//! somebody's content — so it sits under the shot, aligned to the shot's right
+//! edge, and the canvas grows to make room.
 
 use ab_glyph::FontArc;
 use image::{Rgba, RgbaImage};
 
 use super::frame::{blend, rounded_coverage};
 use super::text;
-use crate::settings::{Style, WatermarkPos, WatermarkStyle};
+use crate::settings::{Style, WatermarkStyle};
 
-/// Draw the watermark onto `canvas`.
+/// The finished mark on transparent pixels, rotated and ready to place — or
+/// `None` when there is nothing to stamp.
+///
+/// `shot_w` is the screenshot's own width, never the canvas's: the mark is part
+/// of the shot, so sizing it against the canvas would make the same watermark on
+/// the same screenshot come out a different size at a different padding.
 ///
 /// `logo`, when present, replaces the text entirely — a picture mark and a
 /// wordmark are alternatives, not layers.
-pub fn draw(
-    canvas: &mut RgbaImage,
-    settings: &Style,
-    font: Option<&FontArc>,
-    logo: Option<&RgbaImage>,
-) {
-    let s = settings;
-    if !s.watermark {
-        return;
-    }
-    let Some(stamp) = build_stamp(canvas.width(), s, font, logo) else {
-        return;
-    };
-    let alpha = s.watermark_opacity as f32 / 255.0;
-    // Angle applies either way: a single mark set on a slant is as common as a
-    // diagonal tile, and both come from the same rotated stamp.
-    let stamp = rotate(&stamp, s.watermark_angle.to_radians());
-
-    if s.watermark_tiled {
-        tile_across(canvas, &stamp, alpha);
-    } else {
-        let (x, y) = place(canvas.width(), canvas.height(), &stamp, s);
-        stamp_onto(canvas, &stamp, x, y, alpha);
-    }
-}
-
-/// The mark itself, on transparent pixels. `None` when there is nothing to say.
-fn build_stamp(
-    canvas_w: u32,
+pub fn stamp(
+    shot_w: u32,
     s: &Style,
     font: Option<&FontArc>,
     logo: Option<&RgbaImage>,
 ) -> Option<RgbaImage> {
-    // Size follows the canvas so a watermark looks the same on a phone-sized
-    // crop and on an ultrawide.
-    let base = (14.0 + canvas_w as f32 * 0.006).clamp(11.0, 48.0) * s.watermark_size;
+    if !s.watermark {
+        return None;
+    }
+    let stamp = build_stamp(shot_w, s, font, logo)?;
+    Some(rotate(&stamp, s.watermark_angle.to_radians()))
+}
+
+/// Composite a finished stamp at `(x, y)`, scaling its alpha by the style's
+/// opacity.
+pub fn place(canvas: &mut RgbaImage, stamp: &RgbaImage, x: i64, y: i64, s: &Style) {
+    stamp_onto(canvas, stamp, x, y, f32::from(s.watermark_opacity) / 255.0);
+}
+
+/// The mark itself, on transparent pixels. `None` when there is nothing to say.
+fn build_stamp(
+    shot_w: u32,
+    s: &Style,
+    font: Option<&FontArc>,
+    logo: Option<&RgbaImage>,
+) -> Option<RgbaImage> {
+    // Size follows the shot so a watermark looks the same on a phone-sized crop
+    // and on an ultrawide.
+    let base = (14.0 + shot_w as f32 * 0.006).clamp(11.0, 48.0) * s.watermark_size;
 
     if let Some(logo) = logo {
         let h = (base * 2.5).round().max(8.0);
@@ -118,32 +122,6 @@ fn text_stamp(font: &FontArc, px: f32, label: &str, s: &Style) -> RgbaImage {
     tile
 }
 
-/// Top-left corner for the stamp, given the chosen anchor.
-fn place(cw: u32, ch: u32, stamp: &RgbaImage, s: &Style) -> (i64, i64) {
-    let margin = (cw.min(ch) as f32 * 0.02).max(8.0) as i64;
-    let (cw, ch) = (cw as i64, ch as i64);
-    let (sw, sh) = (stamp.width() as i64, stamp.height() as i64);
-
-    let left = margin;
-    let centre_x = (cw - sw) / 2;
-    let right = cw - sw - margin;
-    let top = margin;
-    let middle_y = (ch - sh) / 2;
-    let bottom = ch - sh - margin;
-
-    match s.watermark_pos {
-        WatermarkPos::TopLeft => (left, top),
-        WatermarkPos::Top => (centre_x, top),
-        WatermarkPos::TopRight => (right, top),
-        WatermarkPos::Left => (left, middle_y),
-        WatermarkPos::Center => (centre_x, middle_y),
-        WatermarkPos::Right => (right, middle_y),
-        WatermarkPos::BottomLeft => (left, bottom),
-        WatermarkPos::Bottom => (centre_x, bottom),
-        WatermarkPos::BottomRight => (right, bottom),
-    }
-}
-
 /// Composite `stamp` at `(ox, oy)`, scaling its alpha by `alpha`.
 fn stamp_onto(canvas: &mut RgbaImage, stamp: &RgbaImage, ox: i64, oy: i64, alpha: f32) {
     for y in 0..stamp.height() {
@@ -158,27 +136,6 @@ fn stamp_onto(canvas: &mut RgbaImage, stamp: &RgbaImage, ox: i64, oy: i64, alpha
             }
             blend(canvas, cx as u32, cy as u32, *px, alpha);
         }
-    }
-}
-
-/// Repeat the stamp over the whole image, offsetting alternate rows so the
-/// repeats do not line up into obvious columns.
-fn tile_across(canvas: &mut RgbaImage, tile: &RgbaImage, alpha: f32) {
-    let step_x = (tile.width() as i64).max(1) + (tile.width() as i64) / 2;
-    let step_y = (tile.height() as i64).max(1) + (tile.height() as i64) / 2;
-    let (cw, ch) = (canvas.width() as i64, canvas.height() as i64);
-
-    let mut row = 0i64;
-    let mut y = -(tile.height() as i64);
-    while y < ch {
-        let stagger = if row % 2 == 0 { 0 } else { step_x / 2 };
-        let mut x = -(tile.width() as i64) + stagger;
-        while x < cw {
-            stamp_onto(canvas, tile, x, y, alpha);
-            x += step_x;
-        }
-        y += step_y;
-        row += 1;
     }
 }
 
@@ -238,71 +195,38 @@ mod tests {
         img.pixels().filter(|p| p.0 != [0, 0, 0, 255]).count()
     }
 
-    /// A stamp with no text and no logo is nothing to draw, and must not become
-    /// an empty rectangle or a panic.
+    /// Nothing to say means no stamp at all, not an empty rectangle.
+    ///
+    /// `None` rather than a 0×0 image matters: the pipeline reserves room from the
+    /// stamp's height, so an empty stamp would open a gap under every shot that
+    /// has no watermark.
     #[test]
-    fn an_empty_watermark_leaves_the_image_untouched() {
-        let mut img = opaque(200, 120);
-        let s = Style {
+    fn an_empty_watermark_produces_no_stamp() {
+        let blank = Style {
             watermark: true,
             watermark_text: "   ".into(),
             ..Default::default()
         };
-        draw(&mut img, &s, None, None);
-        assert_eq!(marked_pixels(&img), 0);
-        // And with the whole feature off.
-        let mut img = opaque(200, 120);
-        draw(&mut img, &Style::default(), None, None);
-        assert_eq!(marked_pixels(&img), 0);
+        assert!(stamp(800, &blank, None, None).is_none(), "blank text");
+        assert!(
+            stamp(800, &Style::default(), None, None).is_none(),
+            "the feature is off"
+        );
     }
 
-    /// Each anchor has to land in its own corner. A sign error here puts the
-    /// mark off-canvas, where it silently does nothing.
+    /// The mark is sized against the shot, never the canvas, so the same
+    /// screenshot keeps the same mark however much padding is put around it.
     #[test]
-    fn every_anchor_lands_in_its_own_region() {
+    fn the_mark_is_sized_from_the_shot() {
         let logo = RgbaImage::from_pixel(20, 10, Rgba([255, 0, 0, 255]));
-        let cases = [
-            (WatermarkPos::TopLeft, true, true),
-            (WatermarkPos::TopRight, false, true),
-            (WatermarkPos::BottomLeft, true, false),
-            (WatermarkPos::BottomRight, false, false),
-        ];
-        for (pos, want_left, want_top) in cases {
-            let mut img = opaque(400, 300);
-            let s = Style {
-                watermark_pos: pos,
-                ..settings()
-            };
-            draw(&mut img, &s, None, Some(&logo));
-
-            let mut sum_x = 0u64;
-            let mut sum_y = 0u64;
-            let mut n = 0u64;
-            for (x, y, p) in img.enumerate_pixels() {
-                if p.0 != [0, 0, 0, 255] {
-                    sum_x += x as u64;
-                    sum_y += y as u64;
-                    n += 1;
-                }
-            }
-            assert!(n > 0, "{pos:?} drew nothing");
-            let (cx, cy) = (sum_x / n, sum_y / n);
-            assert_eq!(cx < 200, want_left, "{pos:?} horizontal: centre at {cx}");
-            assert_eq!(cy < 150, want_top, "{pos:?} vertical: centre at {cy}");
-        }
-    }
-
-    #[test]
-    fn centre_really_is_the_centre() {
-        let logo = RgbaImage::from_pixel(20, 10, Rgba([255, 0, 0, 255]));
-        let mut img = opaque(400, 300);
-        let s = Style {
-            watermark_pos: WatermarkPos::Center,
-            ..settings()
-        };
-        draw(&mut img, &s, None, Some(&logo));
-        // The mark should straddle the middle of the image.
-        assert_ne!(img.get_pixel(200, 150).0, [0, 0, 0, 255]);
+        let small = stamp(400, &settings(), None, Some(&logo)).expect("a logo is a stamp");
+        let big = stamp(2000, &settings(), None, Some(&logo)).expect("a logo is a stamp");
+        assert!(
+            big.height() > small.height(),
+            "a wider shot should take a bigger mark: {} vs {}",
+            small.height(),
+            big.height()
+        );
     }
 
     #[test]
@@ -311,11 +235,11 @@ mod tests {
         let sample = |op: u8| {
             let mut img = opaque(200, 200);
             let s = Style {
-                watermark_pos: WatermarkPos::Center,
                 watermark_opacity: op,
                 ..settings()
             };
-            draw(&mut img, &s, None, Some(&logo));
+            let mark = stamp(800, &s, None, Some(&logo)).expect("a logo is a stamp");
+            place(&mut img, &mark, 80, 80, &s);
             img.get_pixel(100, 100).0[0] as i32
         };
         let (faint, strong) = (sample(40), sample(255));
@@ -324,34 +248,34 @@ mod tests {
         assert_eq!(sample(0), 0, "zero opacity must leave the image alone");
     }
 
-    /// Tiling has to reach every corner, not just the middle.
     #[test]
-    fn tiling_covers_the_whole_image() {
-        let logo = RgbaImage::from_pixel(16, 8, Rgba([255, 0, 0, 255]));
-        let mut img = opaque(300, 200);
+    fn a_logo_replaces_the_text_rather_than_stacking_with_it() {
+        let logo = RgbaImage::from_pixel(30, 30, Rgba([0, 255, 0, 255]));
+        let mut img = opaque(200, 200);
         let s = Style {
-            watermark_tiled: true,
-            watermark_angle: -30.0,
+            watermark_opacity: 255,
             ..settings()
         };
-        draw(&mut img, &s, None, Some(&logo));
-
-        // Split into quadrants; each must have picked up some ink.
-        for (x0, y0) in [(0, 0), (150, 0), (0, 100), (150, 100)] {
-            let hit = (x0..x0 + 150)
-                .flat_map(|x| (y0..y0 + 100).map(move |y| (x, y)))
-                .any(|(x, y)| img.get_pixel(x, y).0 != [0, 0, 0, 255]);
-            assert!(hit, "quadrant at ({x0},{y0}) got no watermark");
-        }
+        let mark = stamp(800, &s, None, Some(&logo)).expect("a logo is a stamp");
+        place(&mut img, &mark, 40, 40, &s);
+        assert!(marked_pixels(&img) > 0, "the logo drew nothing");
+        // Every marked pixel came from the logo, so all of them are its colour.
+        let odd: Vec<Rgba8> = img
+            .pixels()
+            .map(|p| p.0)
+            .filter(|p| *p != [0, 0, 0, 255] && *p != [0, 255, 0, 255])
+            .collect();
+        assert!(
+            odd.is_empty(),
+            "unexpected colours: {:?}",
+            &odd[..odd.len().min(3)]
+        );
     }
 
     /// The bounding box of a rotated rectangle, analytically.
     fn expected_box(w: f32, h: f32, deg: f32) -> (f32, f32) {
         let (sin, cos) = deg.to_radians().sin_cos();
-        (
-            w * cos.abs() + h * sin.abs(),
-            w * sin.abs() + h * cos.abs(),
-        )
+        (w * cos.abs() + h * sin.abs(), w * sin.abs() + h * cos.abs())
     }
 
     #[test]
@@ -384,37 +308,22 @@ mod tests {
             let (ew, eh) = expected_box(100.0, 20.0, deg);
             assert!(
                 (w as f32 - ew).abs() <= 2.5 && (h as f32 - eh).abs() <= 2.5,
-                "{deg}°: got {w}x{h}, expected about {ew:.0}x{eh:.0}"
+                "{deg} deg: got {w}x{h}, expected about {ew:.0}x{eh:.0}"
             );
 
             // Nothing may sit on the outermost ring, or it was cut off.
             for x in 0..w {
-                assert_eq!(turned.get_pixel(x, 0).0[3], 0, "{deg}°: clipped at the top");
+                assert_eq!(
+                    turned.get_pixel(x, 0).0[3],
+                    0,
+                    "{deg} deg: clipped at the top"
+                );
                 assert_eq!(
                     turned.get_pixel(x, h - 1).0[3],
                     0,
-                    "{deg}°: clipped at the bottom"
+                    "{deg} deg: clipped at the bottom"
                 );
             }
         }
-    }
-
-    #[test]
-    fn a_logo_replaces_the_text_rather_than_stacking_with_it() {
-        let logo = RgbaImage::from_pixel(30, 30, Rgba([0, 255, 0, 255]));
-        let mut img = opaque(200, 200);
-        let s = Style {
-            watermark_pos: WatermarkPos::Center,
-            watermark_opacity: 255,
-            ..settings()
-        };
-        draw(&mut img, &s, None, Some(&logo));
-        // Every marked pixel came from the logo, so all of them are its colour.
-        let odd: Vec<Rgba8> = img
-            .pixels()
-            .map(|p| p.0)
-            .filter(|p| *p != [0, 0, 0, 255] && *p != [0, 255, 0, 255])
-            .collect();
-        assert!(odd.is_empty(), "unexpected colours: {:?}", &odd[..odd.len().min(3)]);
     }
 }

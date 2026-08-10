@@ -180,8 +180,30 @@ pub fn render_detailed(scene: &Scene) -> Rendered {
         inset = 0;
     }
 
+    // The watermark belongs to the shot's block, not to the canvas, so it is
+    // built before the canvas is measured and its room is reserved along with the
+    // shot's own.
+    //
+    // Sized from the *unfitted* width deliberately: that width is what the canvas
+    // is about to be measured from, and measuring against a number the
+    // measurement is going to change is a circle. Where `layout` does shrink the
+    // shot, the stamp shrinks by the same factor below, so the two keep their
+    // proportion either way.
+    let stamp = watermark::stamp(shot.width(), s, scene.font, scene.logo);
+    // Reserve the mark plus half its own height as the gap. One number, and it
+    // scales with the mark, so it reads the same on a thumbnail and on an
+    // ultrawide.
+    let reserve = |m: &RgbaImage| m.height() + m.height() / 2;
+
     // 3. Canvas size and how much the screenshot must shrink to fit it.
-    let (cw, ch, shot_fit) = layout(shot.width(), shot.height(), pad, inset, s.ratio, scale);
+    let (cw, ch, shot_fit) = layout(
+        shot.width(),
+        shot.height() + stamp.as_ref().map_or(0, reserve),
+        pad,
+        inset,
+        s.ratio,
+        scale,
+    );
 
     let fitted;
     let shot: &RgbaImage = if shot_fit < 0.999 {
@@ -192,15 +214,28 @@ pub fn render_detailed(scene: &Scene) -> Rendered {
     } else {
         shot
     };
+    let stamp = stamp.map(|m| {
+        if shot_fit < 0.999 {
+            let mw = ((m.width() as f32 * shot_fit).round() as u32).max(1);
+            let mh = ((m.height() as f32 * shot_fit).round() as u32).max(1);
+            image::imageops::resize(&m, mw, mh, image::imageops::FilterType::Lanczos3)
+        } else {
+            m
+        }
+    });
+    let band = stamp.as_ref().map_or(0, reserve);
 
     let (sw, sh) = (shot.width(), shot.height());
     // Never let the frame eat more than the canvas can hold.
     inset = inset
         .min(cw.saturating_sub(sw) / 2)
-        .min(ch.saturating_sub(sh) / 2);
+        .min(ch.saturating_sub(sh + band) / 2);
     let (iw, ih) = (sw + inset * 2, sh + inset * 2);
     let ox = ((cw.saturating_sub(iw)) / 2) as i64;
-    let oy = ((ch.saturating_sub(ih)) / 2) as i64;
+    // The band is part of the block being centred, so the shot sits above centre
+    // by half of it. Centring the shot alone would leave the mark hanging off the
+    // bottom of the padding it was given room in.
+    let oy = ((ch.saturating_sub(ih + band)) / 2) as i64;
 
     // 4. Background.
     let mut canvas = background::paint(cw, ch, s, scene.bg_image, Some(shot));
@@ -256,8 +291,22 @@ pub fn render_detailed(scene: &Scene) -> Rendered {
         }
     }
 
-    // 7. Watermark.
-    watermark::draw(&mut canvas, s, scene.font, scene.logo);
+    // 7. The watermark, in the band below the block.
+    //
+    // Right-aligned to the shot's own right edge — which is the inset rectangle's
+    // edge less the inset, so the mark lines up with the picture and not with the
+    // frame around it. That is the whole point of tying the margin to the inset:
+    // whatever the frame's thickness, the mark and the screenshot share an edge.
+    if let Some(mark) = &stamp {
+        let gap = (band - mark.height()) as i64;
+        watermark::place(
+            &mut canvas,
+            mark,
+            sx + sw as i64 - mark.width() as i64,
+            oy + ih as i64 + gap,
+            s,
+        );
+    }
 
     Rendered {
         image: canvas,
@@ -317,6 +366,68 @@ fn layout(sw: u32, sh: u32, pad: u32, inset: u32, ratio: Ratio, scale: f32) -> (
 mod tests {
     use super::*;
     use crate::annotate::{Layer, Tool};
+
+    /// The watermark sits *under* the shot and shares its right edge.
+    ///
+    /// It used to be an overlay anchored to the canvas, which put it over the
+    /// picture whenever the padding was small — the thing the screenshot was taken
+    /// for, covered by the credit for taking it. Both halves are asserted because
+    /// each broke on its own while this was written: reserving the room without
+    /// moving the shot up left the mark outside the canvas, and aligning to the
+    /// inset rectangle rather than to the shot put it `inset` pixels too far right.
+    #[test]
+    fn the_watermark_sits_below_the_shot_and_shares_its_right_edge() {
+        let Some((_, font)) = text::load_system_font() else {
+            return; // no font on this machine: nothing to letter with
+        };
+        let shot = RgbaImage::from_pixel(200, 120, Rgba([0, 0, 0, 255]));
+        for inset in [0_u32, 12] {
+            let style = Style {
+                watermark: true,
+                watermark_text: "shotr".to_owned(),
+                watermark_opacity: 255,
+                watermark_color: [255, 0, 0, 255],
+                padding: 90,
+                shadow: 0,
+                radius: 0,
+                inset,
+                inset_auto_color: false,
+                inset_color: [0, 255, 0, 255],
+                background: crate::settings::Background::None,
+                ..Style::default()
+            };
+            let scene = Scene {
+                font: Some(&font),
+                ..Scene::plain(&shot, &style, 1.0)
+            };
+            let out = render_detailed(&scene);
+            let (sx, sy, sw, sh) = out.geom.content;
+
+            // Where the red ink landed.
+            let ink: Vec<(u32, u32)> = out
+                .image
+                .enumerate_pixels()
+                .filter(|(_, _, p)| p.0[0] > 150 && p.0[1] < 100 && p.0[3] > 0)
+                .map(|(x, y, _)| (x, y))
+                .collect();
+            assert!(!ink.is_empty(), "inset={inset}: the watermark drew nothing");
+
+            let top = ink.iter().map(|(_, y)| *y).min().unwrap() as i64;
+            let right = ink.iter().map(|(x, _)| *x).max().unwrap() as i64;
+            assert!(
+                top >= sy + sh as i64,
+                "inset={inset}: the mark starts at y={top}, inside a shot ending at {}",
+                sy + sh as i64
+            );
+            // Within a couple of pixels: the glyph's own right side bearing is not
+            // ink, so the last lit column sits just short of the box's edge.
+            let shot_right = sx + sw as i64 - 1;
+            assert!(
+                (shot_right - right).abs() <= 4,
+                "inset={inset}: the mark ends at x={right}, the shot at {shot_right}"
+            );
+        }
+    }
 
     /// `Scene::plain` leaves the font `None`, and a lettered watermark drawn
     /// with no font draws nothing. If `beautify` ever produces what `plain`

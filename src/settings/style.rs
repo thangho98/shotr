@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 use super::ratio::Ratio;
-use super::watermark::{WatermarkPos, WatermarkStyle};
+use super::watermark::WatermarkStyle;
 
 pub type Rgba8 = [u8; 4];
 
@@ -97,15 +97,12 @@ pub struct Style {
 
     pub watermark: bool,
     pub watermark_text: String,
-    pub watermark_pos: WatermarkPos,
     pub watermark_style: WatermarkStyle,
     /// Multiplier on the size derived from the canvas width.
     pub watermark_size: f32,
     pub watermark_opacity: u8,
     pub watermark_color: Rgba8,
-    /// Repeat the mark across the whole image instead of placing it once.
-    pub watermark_tiled: bool,
-    /// Rotation in degrees, applied whether tiled or placed.
+    /// Rotation in degrees.
     pub watermark_angle: f32,
     /// A logo to stamp instead of the text.
     pub watermark_image: Option<PathBuf>,
@@ -132,14 +129,12 @@ impl Default for Style {
             custom_size: (1600, 1000),
             watermark: false,
             watermark_text: "Screenshot by shotr".to_owned(),
-            watermark_pos: WatermarkPos::BottomRight,
             watermark_style: WatermarkStyle::Shadow,
             watermark_size: 1.0,
             // Watermarking tools land around 20–40% for protecting an image;
             // a corner credit line wants a little more presence than that.
             watermark_opacity: 150,
             watermark_color: [255, 255, 255, 255],
-            watermark_tiled: false,
             watermark_angle: 0.0,
             watermark_image: None,
             redact_style: RedactStyle::Solid,

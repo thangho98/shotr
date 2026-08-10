@@ -107,6 +107,7 @@ static VI: &[(&str, &str)] = &[
     ("Angle", "Góc xoay"),
     ("Arrow", "Mũi tên"),
     ("Ask for permission", "Xin quyền"),
+    ("Auto grows the canvas to fit the shot plus its padding.", "Auto mở rộng khung theo ảnh cộng phần đệm."),
     ("Back to 100%", "Về 100%"),
     ("Back to selection", "◀ Chọn lại vùng"),
     ("Back to the Select tool", "Về công cụ Chọn"),
@@ -117,7 +118,6 @@ static VI: &[(&str, &str)] = &[
     ("Bind a system shortcut to: shotr --capture", "Gán phím tắt hệ thống cho: shotr --capture"),
     ("Blur", "Làm mờ"),
     ("Blur amount", "Độ mờ"),
-    ("Border radius", "Bo góc"),
     ("Cancel", "Huỷ"),
     ("Cannot reach the clipboard", "Không truy cập được clipboard"),
     ("Capture a region", "Chụp một vùng"),
@@ -142,6 +142,7 @@ static VI: &[(&str, &str)] = &[
     ("Click the image and type. Enter to finish, Esc to cancel. Click existing text to edit it.", "Bấm lên ảnh rồi gõ. Enter xong, Esc bỏ. Bấm lại chữ cũ để sửa."),
     ("Click to pick a region", "Bấm để chọn vùng chụp"),
     ("Colour", "Màu"),
+    ("Colours", "Màu"),
     ("Copied to the clipboard", "Đã copy vào clipboard"),
     ("Copy", "Copy"),
     ("Copy a region", "Copy một vùng"),
@@ -152,7 +153,7 @@ static VI: &[(&str, &str)] = &[
     ("Copy the text in the image", "📋 Copy chữ trong ảnh"),
     ("Corner", "Góc"),
     ("Crop to selection", "Cắt vùng đã chọn"),
-    ("Custom…", "Tuỳ chỉnh…"),
+    ("Custom", "Tuỳ chỉnh"),
     ("Dark", "Tối"),
     ("Default format", "Định dạng mặc định"),
     ("Delete layer", "Xoá lớp"),
@@ -232,15 +233,14 @@ static VI: &[(&str, &str)] = &[
     ("Pick a recent shot, open a file, or paste from the clipboard.", "Chọn một ảnh gần đây, mở file, hoặc dán từ clipboard."),
     ("Pick a tool", "Chọn công cụ"),
     ("Plain text", "Chữ trơn"),
-    ("Position", "Vị trí"),
     ("Preferences…", "Tuỳ chọn…"),
     ("Preset name", "Tên preset"),
     ("Preset “{name}” deleted", "Đã xoá preset “{name}”"),
     ("Preset “{name}” saved", "Đã lưu preset “{name}”"),
     ("Press a combination…", "Bấm tổ hợp phím…"),
-    ("Protective tiling is usually 20–40% opacity at -30°.", "Lát chống dùng lại ảnh thường để 20–40% độ đục, xoay -30°."),
     ("Quality", "Chất lượng"),
     ("Quit", "Thoát"),
+    ("Radius", "Bo góc"),
     ("Ratio / Size", "Tỉ lệ / Kích thước"),
     ("Read with ocrs — no Vietnamese diacritics.", "Đọc bằng ocrs — không có dấu tiếng Việt."),
     ("Read with tesseract ({langs})", "Đọc bằng tesseract ({langs})"),
@@ -250,7 +250,6 @@ static VI: &[(&str, &str)] = &[
     ("Redact by default", "Mặc định bật che"),
     ("Redact sensitive data ({found} found)", "Che thông tin nhạy cảm (tìm thấy {found})"),
     ("Redaction", "Che thông tin"),
-    ("Redaction colour", "Màu che"),
     ("Redo", "Làm lại"),
     ("Region", "Vùng"),
     ("Releases", "Các bản phát hành"),
@@ -266,8 +265,11 @@ static VI: &[(&str, &str)] = &[
     ("Select", "Chọn"),
     ("Select text", "Chọn chữ"),
     ("Selection: {w} × {h} px", "Vùng chọn: {w} × {h} px"),
+    ("Shadow", "Đổ bóng"),
     ("Shortcuts", "Phím tắt"),
+    ("Sits under the shot, sharing its right edge.", "Nằm dưới ảnh, thẳng cạnh phải của ảnh."),
     ("Size", "Cỡ"),
+    ("Social sizes", "Kích thước mạng xã hội"),
     ("Solid", "Màu đặc"),
     ("Solid colour", "Màu đơn"),
     ("Step 1 — pick a region", "Bước 1 — Chọn vùng"),
@@ -281,10 +283,10 @@ static VI: &[(&str, &str)] = &[
     ("Text recognition (OCR)", "Nhận diện chữ (OCR)"),
     ("The clipboard image is not valid", "Ảnh trong clipboard không hợp lệ"),
     ("The permission is remembered for shotr.app in /Applications. A binary run straight from a terminal borrows the terminal's permission instead.", "Quyền được ghi nhận cho shotr.app trong /Applications. Chạy binary trực tiếp từ terminal thì nó dùng quyền của terminal."),
+    ("The shot is fitted inside the pinned canvas.", "Ảnh được đặt vừa trong khung đã ghim."),
     ("Theme", "Giao diện"),
     ("These are fixed for now.", "Hiện chưa đổi được."),
     ("This compositor will not list windows. Use Region instead.", "Compositor này không cho liệt kê cửa sổ. Dùng chế độ Vùng."),
-    ("Tile across the image", "Lát kín cả ảnh"),
     ("Tokens: {date}, {time}, {unix}", "Mã thay thế: {date}, {time}, {unix}"),
     ("Tools", "Công cụ"),
     ("Trim uniform edges so the subject sits centred", "Cắt bớt viền đồng màu để nội dung nằm giữa"),
@@ -305,6 +307,9 @@ static VI: &[(&str, &str)] = &[
     ("Zoom", "Phóng"),
     ("Zoom in and out", "Phóng to, thu nhỏ"),
     ("` and 1–6 pick a tool · Esc returns to Select", "` và 1–6 chọn công cụ · Esc về Chọn"),
+    ("auto", "tự động"),
+    ("built from the shot", "dựng từ chính ảnh"),
+    ("current wallpaper", "ảnh nền hiện tại"),
     ("macOS cannot report shortcuts held by other apps. If one press does two things, choose another combination.", "macOS không cho biết phím tắt do app khác giữ. Nếu một lần bấm làm hai việc, hãy chọn tổ hợp khác."),
     ("macOS is using {keys} for its own screenshot. Both will run.", "macOS đang dùng {keys} cho ảnh chụp của nó. Cả hai sẽ cùng chạy."),
     ("macOS reads this permission once when an app starts. After allowing it, quit shotr from the menu bar and start it again.", "macOS chỉ đọc quyền này một lần lúc app khởi động. Sau khi cấp, hãy thoát shotr từ menu bar rồi mở lại."),
@@ -343,8 +348,25 @@ mod tests {
         }
     }
 
+    /// The current language is process-wide state and cargo runs tests in
+    /// parallel, so every test that switches it has to take this first or they
+    /// read each other's answers. Poisoning is ignored deliberately: one test
+    /// failing must not turn into four.
+    ///
+    /// It was not needed while the suite happened to interleave harmlessly.
+    /// Adding tests elsewhere in the crate changed the timing and
+    /// `a_placeholder_can_move_within_the_sentence` started reading Vietnamese
+    /// where it had asked for English — a failure with nothing wrong in the code
+    /// it names.
+    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn alone() -> std::sync::MutexGuard<'static, ()> {
+        SERIAL.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     #[test]
     fn placeholders_are_filled_after_translation() {
+        let _serial = alone();
         set(Lang::Vi);
         assert_eq!(
             tf("Saved: {path}", &[("path", "/tmp/a.png")]),
@@ -359,6 +381,7 @@ mod tests {
     /// end. Positional substitution would silently scramble that.
     #[test]
     fn a_placeholder_can_move_within_the_sentence() {
+        let _serial = alone();
         set(Lang::En);
         assert_eq!(tf("{n} words copied", &[("n", "12")]), "12 words copied");
         set(Lang::Vi);
@@ -368,6 +391,7 @@ mod tests {
 
     #[test]
     fn english_returns_the_source_string_untouched() {
+        let _serial = alone();
         set(Lang::En);
         assert_eq!(t("Save"), "Save");
         assert_eq!(t("something never translated"), "something never translated");
@@ -375,6 +399,7 @@ mod tests {
 
     #[test]
     fn vietnamese_translates_what_it_knows_and_falls_back_otherwise() {
+        let _serial = alone();
         set(Lang::Vi);
         assert_eq!(t("Save"), "Lưu");
         assert_eq!(

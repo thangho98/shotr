@@ -219,6 +219,27 @@ fn hairline() -> Stroke {
     Stroke::new(1.0_f32, pal().edge)
 }
 
+/// The rule every control is outlined with.
+fn line_stroke() -> Stroke {
+    Stroke::new(1.0_f32, pal().line)
+}
+
+/// The outline a control gains under the pointer.
+///
+/// On a dark surface it can brighten; on a light one there is nothing brighter
+/// than the control itself, so it darkens instead.
+fn hover_line_of(pal: &Palette) -> Color32 {
+    if pal.dark {
+        Color32::from_rgb(0x3d, 0x41, 0x4c)
+    } else {
+        Color32::from_rgb(0xb4, 0xb9, 0xc2)
+    }
+}
+
+fn hover_line() -> Color32 {
+    hover_line_of(pal())
+}
+
 /// Paint the window frame: fill, plus the hairline that separates it from
 /// whatever is behind. Nothing reaches outside the rectangle — see
 /// [`FRAME_SHADOW`].
@@ -377,7 +398,7 @@ fn style_for(pal: &Palette) -> egui::Style {
     v.popup_shadow.spread = 2;
     v.window_shadow.spread = 2;
 
-    let radius = CornerRadius::same(7);
+    let radius = CornerRadius::same(RADIUS_CONTROL);
     let w = &mut v.widgets;
 
     w.noninteractive.bg_fill = pal.panel;
@@ -386,14 +407,7 @@ fn style_for(pal: &Palette) -> egui::Style {
     w.noninteractive.fg_stroke = Stroke::new(1.0_f32, pal.text_dim);
     w.noninteractive.corner_radius = radius;
 
-    // The outline a control gains under the pointer. On a dark surface it can
-    // brighten; on a light one there is nothing brighter than the control
-    // itself, so it darkens instead.
-    let hover_stroke = if pal.dark {
-        Color32::from_rgb(0x3d, 0x41, 0x4c)
-    } else {
-        Color32::from_rgb(0xb4, 0xb9, 0xc2)
-    };
+    let hover_stroke = hover_line_of(pal);
 
     for (state, fill, stroke) in [
         (&mut w.inactive, pal.surface, pal.line),
@@ -539,21 +553,6 @@ pub fn section(ui: &mut egui::Ui, title: &str) {
     ui.add_space(1.0);
 }
 
-/// A label/value row: name on the left, current value right-aligned and dimmed.
-/// Used above sliders so the number is readable without hovering.
-pub fn slider_label(ui: &mut egui::Ui, name: &str, value: impl std::fmt::Display) {
-    ui.horizontal(|ui| {
-        ui.label(name);
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.label(
-                egui::RichText::new(value.to_string())
-                    .color(pal().text_dim)
-                    .small(),
-            );
-        });
-    });
-}
-
 /// A hairline separator. `ui.separator()` draws edge to edge and at this
 /// contrast it reads as a hard division; sections want a hint, not a wall.
 pub fn rule(ui: &mut egui::Ui) {
@@ -561,6 +560,766 @@ pub fn rule(ui: &mut egui::Ui) {
     let w = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(egui::vec2(w, 1.0), egui::Sense::hover());
     ui.painter().rect_filled(rect, 0.0, pal().line);
+}
+
+// ---------------------------------------------------------------- controls
+//
+// The interface is built out of eight shapes: a card, a welded bar, a
+// segmented track, a chip, a slider row, a checkbox, a swatch and a button.
+// They live here rather than beside the sidebar that needed them first,
+// because the Preferences window is built out of the same eight.
+//
+// Two of them are painted by hand, and both for the same reason: egui takes
+// two colours the design distinguishes from one field. A slider's rail and its
+// knob both come from `widgets.inactive.bg_fill`, and the design wants `canvas`
+// and `text`; a checkbox's tick comes from the same ink as its box, and the
+// design wants an accent box with the tick punched out of it in panel ink. No
+// styling separates either pair.
+
+/// A button, a segmented track, a chip, a welded bar.
+pub const RADIUS_CONTROL: u8 = 8;
+/// A number box, a swatch, a field inside a card.
+pub const RADIUS_SMALL: u8 = 6;
+/// A card.
+pub const RADIUS_CARD: u8 = 9;
+
+/// Full-width button.
+const H_PRIMARY: f32 = 30.0;
+/// Secondary, ghost button.
+const H_GHOST: f32 = 28.0;
+/// A welded bar standing on its own.
+pub const H_BAR: f32 = 28.0;
+/// A welded bar inside a card, where everything is a step tighter.
+pub const H_BAR_CARD: f32 = 26.0;
+const H_SEGMENT: f32 = 26.0;
+const H_CHIP: f32 = 28.0;
+/// The number box beside a slider.
+const H_NUMBER: f32 = 22.0;
+const W_NUMBER: f32 = 42.0;
+/// The label that starts a slider row. Fixed, so the rails of a stack of
+/// sliders line up whatever their labels say.
+const W_SLIDER_LABEL: f32 = 74.0;
+/// Between the parts of one row, and between rows inside a card.
+pub const ROW_GAP: f32 = 9.0;
+const SLIDER_RAIL: f32 = 4.0;
+const SLIDER_KNOB: f32 = 14.0;
+const CHECK_BOX: f32 = 16.0;
+/// Breathing room either side of a label inside a segmented cell.
+const CELL_PAD: f32 = 8.0;
+/// Room either side of the text inside a field.
+///
+/// egui's own default is 4, which puts the caret almost on the border and reads
+/// as text stuck to the edge — the more so in a welded [`Bar`], where there is no
+/// frame of the field's own to separate them.
+pub const FIELD_PAD: i8 = 9;
+
+/// The frame for a field welded into a [`Bar`]: no fill, no stroke, but the
+/// padding a field needs.
+///
+/// Not `Frame::NONE`. `TextEdit` takes its text inset from the frame when it is
+/// given one and from `TextEdit::margin` *only when it is not* — see
+/// `egui-0.34.3/src/widgets/text_edit/builder.rs:666`. So a field handed
+/// `Frame::NONE` ignores its margin and sits flush against the divider, and
+/// setting the margin looks like it should fix that and does nothing.
+pub fn welded_field() -> egui::Frame {
+    egui::Frame::NONE.inner_margin(egui::Margin::symmetric(FIELD_PAD, 0))
+}
+/// A label inside a card row.
+const FONT_ROW: f32 = 12.0;
+
+/// Group a fold's controls into a card.
+///
+/// Without it the controls float loose in the column and a fold's body has no
+/// edge, so two open folds read as one list.
+pub fn card<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    egui::Frame::NONE
+        .fill(pal().glass)
+        .stroke(line_stroke())
+        .corner_radius(CornerRadius::same(RADIUS_CARD))
+        .inner_margin(egui::Margin::symmetric(9, 10))
+        .show(ui, |ui| {
+            // A `Frame` shrinks to its contents, and a card holding one narrow
+            // control — Watermark, with the watermark off — came out as a small
+            // box floating in the column while every other card was full width.
+            ui.set_min_width(ui.available_width());
+            ui.spacing_mut().item_spacing.y = ROW_GAP;
+            add(ui)
+        })
+        .inner
+}
+
+/// Style the controls inside as fields: their own radius, a `surface` fill, and
+/// an accent border while focused.
+///
+/// The radius is a parameter because the design gives the same `TextEdit` two:
+/// [`RADIUS_SMALL`] for a number box or a field inside a card, and
+/// [`RADIUS_CONTROL`] for one standing on its own.
+pub fn field<R>(ui: &mut egui::Ui, radius: u8, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    ui.scope(|ui| {
+        let radius = CornerRadius::same(radius);
+        let w = &mut ui.visuals_mut().widgets;
+        for state in [
+            &mut w.noninteractive,
+            &mut w.inactive,
+            &mut w.hovered,
+            &mut w.active,
+            &mut w.open,
+        ] {
+            state.corner_radius = radius;
+        }
+        // A `TextEdit` fills itself from `extreme_bg_color`, which is the
+        // furthest-back tone in the palette — the same one the slider rail is a
+        // well of. Left alone, a field reads as a hole in the card instead of a
+        // control on it. Scoped rather than set globally, because scroll bar
+        // troughs take their colour from the same field and do want the well.
+        ui.visuals_mut().extreme_bg_color = pal().surface;
+        // A `DragValue` carries `min_size(interact_size)`, which is 40 × 24 by
+        // default — taller than the number box the design asks for, and enough
+        // to push every slider row a little past its card.
+        ui.spacing_mut().interact_size = egui::vec2(W_NUMBER, H_NUMBER);
+        // What `TextEdit` swaps its border for while it has focus.
+        ui.visuals_mut().selection.stroke = Stroke::new(1.0_f32, ACCENT);
+        add(ui)
+    })
+    .inner
+}
+
+/// Strip a widget's own frame so it welds into the [`Bar`] it sits in.
+pub fn frameless(ui: &mut egui::Ui) {
+    let hi = pal().surface_hi;
+    let w = &mut ui.visuals_mut().widgets;
+    for state in [
+        &mut w.inactive,
+        &mut w.hovered,
+        &mut w.active,
+        &mut w.open,
+    ] {
+        state.bg_fill = Color32::TRANSPARENT;
+        state.weak_bg_fill = Color32::TRANSPARENT;
+        state.bg_stroke = Stroke::NONE;
+        state.corner_radius = CornerRadius::ZERO;
+    }
+    // Hover still has to show, or half the bar looks inert.
+    w.hovered.weak_bg_fill = hi;
+    w.active.weak_bg_fill = hi;
+}
+
+/// The one full-width button a screen leads with.
+pub fn primary_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
+    let width = ui.available_width();
+    // `add_sized`, not `min_size`: a button merely *given* a larger minimum keeps
+    // its label where the layout put it, which on a full-width button is hard
+    // left. `add_sized` lays it out centred and justified.
+    let resp = ui.add_sized(egui::vec2(width, H_PRIMARY), egui::Button::new(label));
+    // The design lights the top edge alone; egui strokes all four the same, so
+    // the lit edge goes on afterwards. Inset by the radius so it does not cut
+    // across the corners.
+    let r = resp.rect;
+    let inset = f32::from(RADIUS_CONTROL) * 0.5;
+    ui.painter().hline(
+        (r.left() + inset)..=(r.right() - inset),
+        r.top() + 0.5,
+        Stroke::new(1.0_f32, pal().edge),
+    );
+    resp
+}
+
+/// A full-width button for the action nobody should hit by accident: an
+/// outline and dimmed lettering, no fill.
+pub fn ghost_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
+    let width = ui.available_width();
+    ui.scope(|ui| {
+        let dim = pal().text_dim;
+        let w = &mut ui.visuals_mut().widgets;
+        for state in [&mut w.inactive, &mut w.hovered, &mut w.active] {
+            state.weak_bg_fill = Color32::TRANSPARENT;
+        }
+        w.inactive.fg_stroke.color = dim;
+        ui.add_sized(egui::vec2(width, H_GHOST), egui::Button::new(label))
+    })
+    .inner
+}
+
+/// A hand-painted checkbox: 16px box, accent when on, the tick punched out of
+/// it in panel ink.
+///
+/// Returns the `Response` with `changed()` set by hand, because every caller
+/// reads it and a widget built out of `interact` does not get it for free.
+pub fn checkbox(ui: &mut egui::Ui, on: &mut bool, label: &str) -> egui::Response {
+    let text_w = (ui.available_width() - CHECK_BOX - ROW_GAP).max(40.0);
+    let galley = ui.painter().layout(
+        label.to_owned(),
+        egui::FontId::proportional(13.0),
+        pal().text,
+        text_w,
+    );
+    let size = egui::vec2(
+        CHECK_BOX + ROW_GAP + galley.size().x,
+        galley.size().y.max(CHECK_BOX),
+    );
+    let (rect, mut resp) = ui.allocate_exact_size(size, egui::Sense::click());
+    if resp.clicked() {
+        *on = !*on;
+        resp.mark_changed();
+    }
+    // egui's own widgets report themselves to the accessibility tree; one built
+    // out of `allocate_exact_size` reports nothing at all unless told to.
+    let enabled = ui.is_enabled();
+    let state = *on;
+    resp.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::Checkbox, enabled, state, label)
+    });
+
+    let box_rect = egui::Rect::from_center_size(
+        egui::pos2(rect.left() + CHECK_BOX / 2.0, rect.center().y),
+        egui::Vec2::splat(CHECK_BOX),
+    );
+    let (fill, edge) = match (*on, resp.hovered()) {
+        (true, _) => (ACCENT, ACCENT),
+        (false, true) => (pal().surface_hi, hover_line()),
+        (false, false) => (pal().surface, pal().line),
+    };
+    let painter = ui.painter();
+    painter.rect(
+        box_rect,
+        CornerRadius::same(5),
+        fill,
+        Stroke::new(1.0_f32, edge),
+        egui::StrokeKind::Inside,
+    );
+    if *on {
+        let c = box_rect.center();
+        painter.add(egui::Shape::line(
+            vec![
+                egui::pos2(c.x - 3.5, c.y - 0.2),
+                egui::pos2(c.x - 1.0, c.y + 2.6),
+                egui::pos2(c.x + 3.6, c.y - 3.0),
+            ],
+            Stroke::new(1.8_f32, pal().panel),
+        ));
+    }
+    painter.galley(
+        egui::pos2(
+            rect.left() + CHECK_BOX + ROW_GAP,
+            rect.center().y - galley.size().y / 2.0,
+        ),
+        galley,
+        pal().text,
+    );
+    resp
+}
+
+/// The name that starts a row inside a card.
+///
+/// Fixed width, so the controls down a stack of rows line up whatever their
+/// labels say — which is the whole reason the labels are short.
+pub fn row_label(ui: &mut egui::Ui, text: &str) {
+    let (rect, _) =
+        ui.allocate_exact_size(egui::vec2(W_SLIDER_LABEL, H_NUMBER), egui::Sense::hover());
+    ui.painter().with_clip_rect(rect).text(
+        rect.left_center(),
+        egui::Align2::LEFT_CENTER,
+        text,
+        egui::FontId::proportional(FONT_ROW),
+        pal().text_dim,
+    );
+}
+
+/// `label · rail · number box`, the row every dial in the app is made of.
+///
+/// The number box is the reason the row exists: dragging cannot enter an exact
+/// value, and every one of these ranges has values worth typing.
+pub fn slider_row<N: egui::emath::Numeric>(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: &mut N,
+    range: std::ops::RangeInclusive<N>,
+    suffix: &str,
+) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = ROW_GAP;
+        row_label(ui, label);
+        let rail_w = (ui.available_width() - W_NUMBER - ROW_GAP).max(48.0);
+        changed |= rail(ui, rail_w, value, &range);
+        changed |= field(ui, RADIUS_SMALL, |ui| {
+            ui.add_sized(
+                egui::vec2(W_NUMBER, H_NUMBER),
+                egui::DragValue::new(value).range(range).suffix(suffix),
+            )
+            .changed()
+        });
+    });
+    changed
+}
+
+/// The rail on its own, for a row that needs something other than a number box
+/// beside it.
+pub fn rail<N: egui::emath::Numeric>(
+    ui: &mut egui::Ui,
+    width: f32,
+    value: &mut N,
+    range: &std::ops::RangeInclusive<N>,
+) -> bool {
+    let (rect, resp) = ui.allocate_exact_size(
+        egui::vec2(width, SLIDER_KNOB),
+        egui::Sense::click_and_drag(),
+    );
+    let (lo, hi) = (range.start().to_f64(), range.end().to_f64());
+    // The knob travels an inset span so that neither end of it hangs off the
+    // rail; the rail itself is drawn full width.
+    let travel = egui::Rangef::new(
+        rect.left() + SLIDER_KNOB / 2.0,
+        rect.right() - SLIDER_KNOB / 2.0,
+    );
+
+    let mut changed = false;
+    if let Some(p) = resp.interact_pointer_pos() {
+        let picked = value_at(p.x, travel, lo, hi, N::INTEGRAL);
+        if picked != value.to_f64() {
+            *value = N::from_f64(picked);
+            changed = true;
+        }
+    }
+
+    let enabled = ui.is_enabled();
+    let reading = value.to_f64();
+    resp.widget_info(|| egui::WidgetInfo::slider(enabled, reading, ""));
+
+    let t = fraction(value.to_f64(), lo, hi);
+    let mid = rect.center().y;
+    let bar = egui::Rect::from_min_max(
+        egui::pos2(rect.left(), mid - SLIDER_RAIL / 2.0),
+        egui::pos2(rect.right(), mid + SLIDER_RAIL / 2.0),
+    );
+    let radius = CornerRadius::same((SLIDER_RAIL / 2.0) as u8);
+    let painter = ui.painter();
+    painter.rect_filled(bar, radius, pal().canvas);
+    let knob_x = travel.min + t * travel.span();
+    if knob_x > bar.left() {
+        painter.rect_filled(
+            egui::Rect::from_min_max(bar.min, egui::pos2(knob_x, bar.max.y)),
+            radius,
+            ACCENT,
+        );
+    }
+    painter.circle(
+        egui::pos2(knob_x, mid),
+        SLIDER_KNOB / 2.0,
+        pal().text,
+        Stroke::new(1.0_f32, Color32::from_black_alpha(89)),
+    );
+    changed
+}
+
+/// Where the knob sits along its travel, 0..1.
+fn fraction(value: f64, lo: f64, hi: f64) -> f32 {
+    if hi <= lo {
+        return 0.0;
+    }
+    (((value - lo) / (hi - lo)) as f32).clamp(0.0, 1.0)
+}
+
+/// The value a pointer at `x` picks. Clamped, so a drag that runs off the end
+/// of the rail pins to the end of the range instead of leaving it.
+fn value_at(x: f32, travel: egui::Rangef, lo: f64, hi: f64, integral: bool) -> f64 {
+    let t = if travel.span() > 0.0 {
+        ((x - travel.min) / travel.span()).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let raw = lo + f64::from(t) * (hi - lo);
+    if integral { raw.round() } else { raw }
+}
+
+/// A row of mutually exclusive options welded into one track.
+///
+/// Loose `selectable_label`s say "here are some buttons"; a joined track says
+/// "exactly one of these". Every choice in the app is the second thing.
+pub fn segmented<T: Copy + PartialEq>(
+    ui: &mut egui::Ui,
+    id: &str,
+    current: &mut T,
+    options: &[(T, &str)],
+) -> bool {
+    let width = ui.available_width();
+    let font = egui::FontId::proportional(FONT_ROW);
+
+    // Wrap onto more rows rather than squeeze: four watermark styles on one row
+    // gave each 74pt for labels like "Rounded plate", and the clip took the last
+    // word off every one of them. Measured, so it holds in either language.
+    let widest = options
+        .iter()
+        .map(|(_, label)| {
+            ui.painter()
+                .layout_no_wrap((*label).to_owned(), font.clone(), pal().text)
+                .size()
+                .x
+        })
+        .fold(0.0_f32, f32::max);
+    let per_row = cells_per_row(width, widest, options.len());
+    let rows = row_sizes(options.len(), per_row);
+
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(width, H_SEGMENT * rows.len() as f32),
+        egui::Sense::hover(),
+    );
+    // Allocated first, and only then given up on: returning before the
+    // allocation would shift the auto-generated id of every widget after it.
+    if options.is_empty() {
+        return false;
+    }
+    let radius = CornerRadius::same(RADIUS_CONTROL);
+    let last_row = rows.len() - 1;
+    let mut changed = false;
+    let mut index = 0;
+
+    for (r, count) in rows.iter().copied().enumerate() {
+        let top = rect.top() + H_SEGMENT * r as f32;
+        let row = egui::Rect::from_min_max(
+            egui::pos2(rect.left(), top),
+            egui::pos2(rect.right(), top + H_SEGMENT),
+        );
+        if r > 0 {
+            ui.painter().rect_filled(
+                egui::Rect::from_min_max(
+                    egui::pos2(row.left(), row.top()),
+                    egui::pos2(row.right(), row.top() + 1.0),
+                ),
+                0.0,
+                pal().line,
+            );
+        }
+
+        for i in 0..count {
+            let (value, label) = options[index];
+            let (x0, x1) = segment_bounds(row.x_range(), i, count);
+            let cell =
+                egui::Rect::from_min_max(egui::pos2(x0, row.top()), egui::pos2(x1, row.bottom()));
+            let resp = ui.interact(cell, ui.id().with((id, index)), egui::Sense::click());
+            let on = *current == value;
+            let enabled = ui.is_enabled();
+            resp.widget_info(|| {
+                egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, enabled, on, label)
+            });
+            // Only the block's four outer corners are rounded; a filled cell with
+            // corners of its own leaves the track showing through in notches.
+            let corners = CornerRadius {
+                nw: if r == 0 && i == 0 { radius.nw } else { 0 },
+                ne: if r == 0 && i + 1 == count { radius.ne } else { 0 },
+                sw: if r == last_row && i == 0 { radius.sw } else { 0 },
+                se: if r == last_row && i + 1 == count {
+                    radius.se
+                } else {
+                    0
+                },
+            };
+            let fill = match (on, resp.hovered()) {
+                (true, _) => ACCENT.gamma_multiply(0.30),
+                (false, true) => pal().surface,
+                (false, false) => Color32::TRANSPARENT,
+            };
+            if fill != Color32::TRANSPARENT {
+                ui.painter().rect_filled(cell, corners, fill);
+            }
+            if i > 0 {
+                ui.painter().rect_filled(
+                    egui::Rect::from_min_max(
+                        egui::pos2(x0, row.top()),
+                        egui::pos2(x0 + 1.0, row.bottom()),
+                    ),
+                    0.0,
+                    pal().line,
+                );
+            }
+            let ink = if on || resp.hovered() {
+                pal().text
+            } else {
+                pal().text_dim
+            };
+            ui.painter().with_clip_rect(cell).text(
+                cell.center(),
+                egui::Align2::CENTER_CENTER,
+                label,
+                font.clone(),
+                ink,
+            );
+            if resp.clicked() {
+                *current = value;
+                changed = true;
+            }
+            index += 1;
+        }
+    }
+
+    ui.painter()
+        .rect_stroke(rect, radius, line_stroke(), egui::StrokeKind::Inside);
+    changed
+}
+
+/// How many cells fit on one row with room for the longest label.
+fn cells_per_row(width: f32, widest_label: f32, n: usize) -> usize {
+    if n == 0 {
+        return 1;
+    }
+    let needed = widest_label + CELL_PAD * 2.0;
+    if needed <= 0.0 {
+        return n;
+    }
+    let fits = (width / needed).floor().max(1.0) as usize;
+    fits.clamp(1, n)
+}
+
+/// Spread `n` cells over as few rows as `per_row` allows, evenly.
+///
+/// Evenly, not greedily: five options at three per row is 3 + 2, never 3 + 1 + 1
+/// and never a row with one lonely cell in it.
+fn row_sizes(n: usize, per_row: usize) -> Vec<usize> {
+    if n == 0 {
+        return vec![0];
+    }
+    let rows = n.div_ceil(per_row.max(1));
+    let base = n / rows;
+    let extra = n % rows;
+    (0..rows).map(|r| base + usize::from(r < extra)).collect()
+}
+
+/// Cell `i` of `n` across `span`.
+///
+/// Rounded boundaries rather than a rounded width: `n` cells of `w / n` leave a
+/// sliver of the track showing between the fills, which reads as a seam through
+/// the selected cell. The outer two boundaries are the track's own edges
+/// untouched — rounding them lands the end cell up to half a pixel past the
+/// outline, and a fractional width is the normal case, not the odd one.
+fn segment_bounds(span: egui::Rangef, i: usize, n: usize) -> (f32, f32) {
+    let at = |k: usize| match k {
+        0 => span.min,
+        k if k == n => span.max,
+        k => span.min + (span.span() * k as f32 / n as f32).round(),
+    };
+    (at(i), at(i + 1))
+}
+
+/// One option with its own subtitle: a name, and what it means in pixels.
+pub fn chip(ui: &mut egui::Ui, width: f32, on: bool, name: &str, sub: &str) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(width, H_CHIP), egui::Sense::click());
+    let enabled = ui.is_enabled();
+    resp.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, enabled, on, name)
+    });
+    let radius = CornerRadius::same(RADIUS_CONTROL);
+    let fill = match (on, resp.hovered()) {
+        (true, _) => ACCENT.gamma_multiply(0.18),
+        (false, true) => pal().surface,
+        (false, false) => Color32::TRANSPARENT,
+    };
+    let painter = ui.painter();
+    if fill != Color32::TRANSPARENT {
+        painter.rect_filled(rect, radius, fill);
+    }
+    painter.rect_stroke(
+        rect,
+        radius,
+        Stroke::new(1.0_f32, if on { ACCENT } else { pal().line }),
+        egui::StrokeKind::Inside,
+    );
+    let inner = painter.with_clip_rect(rect.shrink(2.0));
+    inner.text(
+        rect.left_center() + egui::vec2(8.0, 0.0),
+        egui::Align2::LEFT_CENTER,
+        name,
+        egui::FontId::proportional(FONT_ROW),
+        pal().text,
+    );
+    inner.text(
+        rect.right_center() - egui::vec2(8.0, 0.0),
+        egui::Align2::RIGHT_CENTER,
+        sub,
+        egui::FontId::proportional(10.0),
+        if on { ACCENT } else { pal().text_dim },
+    );
+    resp
+}
+
+/// Controls welded into one framed bar with hairline dividers.
+///
+/// Three widgets with gaps between them read as three decisions; the preset
+/// row is one decision, so it gets one outline.
+pub struct Bar {
+    /// One child `Ui` for the whole bar, and every cell is a child of *this*.
+    ///
+    /// Not a convenience. `Ui::new_child` bumps the **parent's** auto-id counter
+    /// whichever salt the child was given, and every widget id after it is
+    /// derived from that counter — so a bar that made one child of the *caller's*
+    /// `Ui` per cell renamed everything downstream whenever a cell appeared. See
+    /// the test, which names the gesture that broke.
+    inner: egui::Ui,
+    rect: egui::Rect,
+    x: f32,
+}
+
+impl Bar {
+    /// Allocate the bar and paint its frame. The cells are drawn afterwards and
+    /// therefore on top of it.
+    pub fn new(ui: &mut egui::Ui, salt: &str, height: f32) -> Self {
+        let width = ui.available_width();
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
+        let radius = CornerRadius::same(RADIUS_CONTROL);
+        let painter = ui.painter();
+        painter.rect_filled(rect, radius, pal().surface);
+        painter.rect_stroke(rect, radius, line_stroke(), egui::StrokeKind::Inside);
+        let inner = ui.new_child(egui::UiBuilder::new().id_salt(salt).max_rect(rect));
+        Self {
+            inner,
+            rect,
+            x: rect.left(),
+        }
+    }
+
+    pub fn cell(&mut self, salt: &str, width: f32) -> egui::Ui {
+        self.slice(salt, width)
+    }
+
+    /// The flexible cell: everything except the `keep` the cells after it need.
+    /// Stated by the caller rather than tracked here, because the bar cannot
+    /// know what is still to come.
+    pub fn rest(&mut self, salt: &str, keep: f32) -> egui::Ui {
+        let width = (self.rect.right() - self.x - keep).max(0.0);
+        self.slice(salt, width)
+    }
+
+    fn slice(&mut self, salt: &str, width: f32) -> egui::Ui {
+        if self.x > self.rect.left() + 0.5 {
+            self.inner.painter().rect_filled(
+                egui::Rect::from_min_max(
+                    egui::pos2(self.x, self.rect.top()),
+                    egui::pos2(self.x + 1.0, self.rect.bottom()),
+                ),
+                0.0,
+                pal().line,
+            );
+        }
+        let cell = egui::Rect::from_min_max(
+            egui::pos2(self.x, self.rect.top()),
+            egui::pos2(self.x + width, self.rect.bottom()),
+        );
+        self.x += width;
+        // A cell narrower than its own inset would come out inverted, and a
+        // negative `available_size` makes every widget inside it lay out wrong.
+        let inset = if cell.width() > 2.0 {
+            cell.shrink(1.0)
+        } else {
+            cell
+        };
+        let mut child = self.inner.new_child(
+            egui::UiBuilder::new()
+                .id_salt(salt)
+                .max_rect(inset)
+                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+        );
+        frameless(&mut child);
+        child
+    }
+}
+
+/// One background swatch: the gradient, and nothing else.
+///
+/// Not a `Button::image`. A button brings padding and a frame, which inset the
+/// gradient inside a box and turned a grid of colours into a grid of widgets —
+/// the swatch *is* the value, so the cell is all image.
+pub fn swatch(
+    ui: &mut egui::Ui,
+    tex: &egui::TextureHandle,
+    side: f32,
+    selected: bool,
+) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(egui::Vec2::splat(side), egui::Sense::click());
+    let enabled = ui.is_enabled();
+    resp.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, enabled, selected, "")
+    });
+    let painter = ui.painter();
+    let radius = CornerRadius::same(RADIUS_SMALL);
+    let mut shape = egui::epaint::RectShape::filled(rect, radius, Color32::WHITE);
+    shape.brush = Some(std::sync::Arc::new(egui::epaint::Brush {
+        fill_texture_id: tex.id(),
+        uv: egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+    }));
+    painter.add(shape);
+    if selected {
+        swatch_selected(painter, rect);
+    } else if resp.hovered() {
+        painter.rect_stroke(
+            rect,
+            radius,
+            Stroke::new(1.0_f32, pal().text),
+            egui::StrokeKind::Inside,
+        );
+    }
+    resp
+}
+
+/// Mark the chosen swatch: a hairline round it, and an accent halo outside
+/// that.
+///
+/// Reaches 2px beyond the cell, which the grid's 6px gap has room for. A tint
+/// over the swatch would be wrong here — the swatch *is* the value, and
+/// colouring it shows a background the export will not have.
+fn swatch_selected(painter: &egui::Painter, rect: egui::Rect) {
+    let radius = CornerRadius::same(RADIUS_SMALL);
+    painter.rect_stroke(
+        rect,
+        radius,
+        Stroke::new(2.0_f32, ACCENT.gamma_multiply(0.35)),
+        egui::StrokeKind::Outside,
+    );
+    painter.rect_stroke(
+        rect,
+        radius,
+        Stroke::new(1.0_f32, pal().text),
+        egui::StrokeKind::Inside,
+    );
+}
+
+/// A colour button at the size the design asks for.
+///
+/// egui takes its size from `interact_size`, which is shared with every other
+/// widget, so the size has to be scoped rather than set.
+pub fn color_swatch(ui: &mut egui::Ui, color: &mut Color32, side: f32) -> egui::Response {
+    ui.scope(|ui| {
+        ui.spacing_mut().interact_size = egui::Vec2::splat(side);
+        let w = &mut ui.visuals_mut().widgets;
+        for state in [&mut w.inactive, &mut w.hovered, &mut w.active, &mut w.open] {
+            state.corner_radius = CornerRadius::same(RADIUS_SMALL);
+            state.bg_stroke = Stroke::new(1.0_f32, Color32::from_white_alpha(46));
+        }
+        ui.color_edit_button_srgba(color)
+    })
+    .inner
+}
+
+/// How wide a text button will come out, for a row that has to keep space for
+/// one before it knows what else is on the row.
+///
+/// Measured rather than assumed. Every label here is translated, and a constant
+/// that fits the English fits nothing else: "auto" is 34pt and "tự động" is half
+/// again as wide.
+pub fn text_button_width(ui: &egui::Ui, text: &str, size: f32) -> f32 {
+    let galley = ui.painter().layout_no_wrap(
+        text.to_owned(),
+        egui::FontId::proportional(size),
+        pal().text,
+    );
+    galley.size().x + ui.spacing().button_padding.x * 2.0
+}
+
+/// An 11px dimmed line: what a control just did, or what it will do.
+pub fn hint(ui: &mut egui::Ui, text: impl Into<String>) {
+    ui.label(
+        egui::RichText::new(text)
+            .size(11.0)
+            .color(pal().text_dim),
+    );
 }
 
 #[cfg(test)]
@@ -790,6 +1549,298 @@ mod tests {
             *pal(),
             DARK,
             "picking Dark in Preferences has to survive the desktop being light"
+        );
+    }
+
+    /// The cells of a segmented track have to tile it exactly. Sizing each one
+    /// `width / n` and rounding leaves a sliver of the track's own fill between
+    /// them, which reads as a seam drawn through the selected cell.
+    #[test]
+    fn a_segmented_track_is_tiled_by_its_cells_with_no_seam() {
+        for width in [120.0_f32, 199.0, 261.0, 288.5, 336.0] {
+            for n in 2..=6_usize {
+                let span = egui::Rangef::new(11.0, 11.0 + width);
+                let mut prev = span.min;
+                for i in 0..n {
+                    let (x0, x1) = segment_bounds(span, i, n);
+                    assert_eq!(x0, prev, "w={width} n={n} cell {i} leaves a seam behind it");
+                    assert!(x1 > x0, "w={width} n={n} cell {i} is empty");
+                    prev = x1;
+                }
+                assert_eq!(prev, span.max, "w={width} n={n}: the last cell misses the edge");
+            }
+        }
+    }
+
+    /// A slider has to reach both ends of its range, and the knob has to stay on
+    /// the rail while it does. `x = left + t * width` gets the first and fails
+    /// the second: the knob hangs half off at either end.
+    #[test]
+    fn a_slider_reaches_both_ends_of_its_range_without_leaving_the_rail() {
+        let rail = egui::Rangef::new(40.0, 240.0);
+        let travel = egui::Rangef::new(rail.min + 7.0, rail.max - 7.0);
+        for (lo, hi) in [(0.0, 400.0), (0.0, 100.0), (-90.0, 90.0), (0.4, 4.0)] {
+            assert_eq!(value_at(travel.min, travel, lo, hi, false), lo, "left end misses the minimum");
+            assert_eq!(value_at(travel.max, travel, lo, hi, false), hi, "right end misses the maximum");
+            for (value, t) in [(lo, 0.0_f32), (hi, 1.0)] {
+                let knob = travel.min + fraction(value, lo, hi) * travel.span();
+                assert!(
+                    knob - 7.0 >= rail.min - 0.01 && knob + 7.0 <= rail.max + 0.01,
+                    "the knob hangs off the rail at t={t}: centre {knob} on {rail:?}"
+                );
+            }
+        }
+    }
+
+    /// Dragging past the end of the rail must pin to the end of the range, not
+    /// walk out of it. The renderer clamps too, so this shows up as a slider
+    /// that stops responding rather than as anything visibly wrong.
+    #[test]
+    fn dragging_off_the_end_of_a_rail_stays_inside_the_range() {
+        let travel = egui::Rangef::new(50.0, 150.0);
+        for x in [-400.0_f32, 0.0, 49.9, 150.1, 900.0] {
+            let v = value_at(x, travel, 0.0, 80.0, true);
+            assert!((0.0..=80.0).contains(&v), "x={x} picked {v}, outside 0..=80");
+        }
+    }
+
+    /// An integral slider must not hand a fraction to a `u32` field, and a
+    /// float one must keep its fraction.
+    #[test]
+    fn a_slider_rounds_only_for_whole_numbered_ranges() {
+        let travel = egui::Rangef::new(0.0, 100.0);
+        let whole = value_at(33.3, travel, 0.0, 10.0, true);
+        assert_eq!(whole, whole.round(), "an integral range produced {whole}");
+        let fine = value_at(33.3, travel, 0.0, 1.0, false);
+        assert!(fine > 0.0 && fine < 1.0, "a float range was rounded away to {fine}");
+    }
+
+    /// The whole app reads `changed()` on a checkbox to decide whether to
+    /// re-render the shot. A hand-painted widget does not get that for free, and
+    /// a version that reported a change every frame would re-bake the preview
+    /// forever — which costs 275ms a time.
+    #[test]
+    fn a_hand_painted_checkbox_reports_a_change_only_when_it_is_clicked() {
+        let _serial = alone();
+        let ctx = egui::Context::default();
+        apply(&ctx, ThemeMode::Dark);
+
+        // The widget is placed by the layout, so its rect is only known after a
+        // frame has drawn it.
+        let mut on = false;
+        let mut seen = egui::Rect::NOTHING;
+        let quiet = |ctx: &egui::Context, on: &mut bool, seen: &mut egui::Rect| {
+            let mut changed = false;
+            let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+                let resp = checkbox(ui, on, "Balance");
+                *seen = resp.rect;
+                changed = resp.changed();
+            });
+            changed
+        };
+        assert!(!quiet(&ctx, &mut on, &mut seen), "an untouched checkbox reported a change");
+        assert!(!on, "an untouched checkbox toggled itself");
+
+        let click = seen.center();
+        let press = egui::RawInput {
+            events: vec![
+                egui::Event::PointerMoved(click),
+                egui::Event::PointerButton {
+                    pos: click,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+            ..Default::default()
+        };
+        let _ = ctx.run_ui(press, |ui| {
+            checkbox(ui, &mut on, "Balance");
+        });
+
+        let mut changed = false;
+        let release = egui::RawInput {
+            events: vec![egui::Event::PointerButton {
+                pos: click,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            ..Default::default()
+        };
+        let _ = ctx.run_ui(release, |ui| {
+            changed = checkbox(ui, &mut on, "Balance").changed();
+        });
+        assert!(changed, "clicking a checkbox reported no change");
+        assert!(on, "clicking a checkbox did not toggle it");
+
+        assert!(
+            !quiet(&ctx, &mut on, &mut seen),
+            "a checkbox went on reporting a change after the click was over"
+        );
+    }
+
+    /// A ticked checkbox is an accent box with the tick *punched out of it* in
+    /// panel ink — not a tick drawn in the same ink as the label.
+    ///
+    /// This is the whole reason the widget is painted by hand rather than styled:
+    /// egui takes the tick from `fg_stroke`, which is the text colour, and a
+    /// near-white tick on the accent has barely any contrast. Asserted on the
+    /// shapes rather than on pixels, because it is a decision about which colour
+    /// goes where and not about anti-aliasing.
+    #[test]
+    fn a_ticked_checkbox_punches_its_tick_out_of_the_accent_in_panel_ink() {
+        let _serial = alone();
+        let ctx = egui::Context::default();
+        apply(&ctx, ThemeMode::Dark);
+
+        let mut on = true;
+        let out = ctx.run_ui(egui::RawInput::default(), |ui| {
+            checkbox(ui, &mut on, "Balance");
+        });
+
+        let mut box_fill = None;
+        let mut tick_ink = None;
+        for clipped in &out.shapes {
+            match &clipped.shape {
+                egui::Shape::Rect(r) if r.fill == ACCENT => box_fill = Some(r.fill),
+                egui::Shape::Path(p) => {
+                    if let egui::epaint::ColorMode::Solid(c) = p.stroke.color {
+                        tick_ink = Some(c);
+                    }
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(box_fill, Some(ACCENT), "a ticked box is not filled with the accent");
+        assert_eq!(
+            tick_ink,
+            Some(DARK.panel),
+            "the tick is not drawn in panel ink, so it has no contrast against the accent"
+        );
+    }
+
+    /// A welded field carries its padding on the *frame*.
+    ///
+    /// This is the whole reason `welded_field` exists rather than `Frame::NONE`:
+    /// `TextEdit` reads its text inset from the frame when it has one and from
+    /// `margin` only when it has none, so setting the margin on a `Frame::NONE`
+    /// field compiles, reads correctly, and does nothing — the caret stays flush
+    /// against the divider. Reported twice before the cause was found.
+    #[test]
+    fn a_welded_field_keeps_its_text_off_the_divider() {
+        let frame = welded_field();
+        assert_eq!(
+            frame.inner_margin.left, FIELD_PAD,
+            "the padding is not on the frame, so the field will ignore it"
+        );
+        assert_eq!(frame.inner_margin.right, FIELD_PAD, "right side too");
+        assert_eq!(
+            frame.fill,
+            Color32::TRANSPARENT,
+            "a welded field must show the bar's own fill, not one of its own"
+        );
+        assert_eq!(
+            frame.stroke.width, 0.0,
+            "a welded field must not draw a second border inside the bar's"
+        );
+    }
+
+    /// A segmented track wraps rather than clipping its labels.
+    ///
+    /// Four watermark styles on one 336pt row left 74pt each, and "Rounded plate"
+    /// lost its last word to the clip — reported as options being hidden. Every
+    /// cell has to be wide enough for the longest label in the set, because they
+    /// all share a width.
+    #[test]
+    fn a_segmented_track_gives_every_cell_room_for_the_longest_label() {
+        // The real case: the sidebar's usable width, and the widest label in each
+        // set as laid out at 12px.
+        for (width, widest, n) in [
+            (288.0_f32, 78.0_f32, 4), // watermark styles
+            (288.0, 30.0, 5),         // aspect ratios: Auto · 4:3 · 3:2 · 16:9 · 1:1
+            (288.0, 60.0, 3),         // PNG · JPEG · WebP
+            (120.0, 78.0, 4),         // a panel far narrower than we ship
+        ] {
+            let per_row = cells_per_row(width, widest, n);
+            let rows = row_sizes(n, per_row);
+            assert_eq!(rows.iter().sum::<usize>(), n, "cells went missing");
+            for count in rows {
+                let cell = width / count as f32;
+                // One cell per row is the floor: below that there is nothing left
+                // to give, and clipping is the honest outcome.
+                assert!(
+                    count == 1 || cell >= widest,
+                    "w={width} n={n}: {count} cells of {cell:.0}pt cannot hold a {widest:.0}pt label"
+                );
+            }
+        }
+    }
+
+    /// Rows are filled evenly, so no row is left with one lonely cell in it.
+    #[test]
+    fn segmented_rows_are_balanced() {
+        assert_eq!(row_sizes(4, 2), vec![2, 2], "four options at two per row");
+        assert_eq!(row_sizes(5, 3), vec![3, 2], "five at three, not 3+1+1");
+        assert_eq!(row_sizes(5, 5), vec![5], "everything fits on one row");
+        assert_eq!(row_sizes(1, 3), vec![1], "one option is one row");
+    }
+
+    /// A bar whose cells come and go must not rename the widgets after it.
+    ///
+    /// `Ui::new_child` bumps the *parent's* auto-id counter whether or not the
+    /// child was given a salt (`egui-0.34.3/src/ui.rs:303`), and every widget id
+    /// downstream is derived from that counter. So a bar that made one child per
+    /// cell renamed the whole sidebar the moment its delete button appeared —
+    /// and that button appears exactly when the current style matches a saved
+    /// preset, which stops being true on the *first frame of a drag*. The drag
+    /// then died after one step, and a number box lost focus after one
+    /// keystroke. The bar therefore takes one child of its own and puts every
+    /// cell inside that, so the parent sees the same single bump either way.
+    #[test]
+    fn a_bar_whose_cells_come_and_go_does_not_rename_what_follows_it() {
+        let _serial = alone();
+        let ctx = egui::Context::default();
+        apply(&ctx, ThemeMode::Dark);
+
+        let mut ids = Vec::new();
+        for delete_cell in [true, false] {
+            let mut after = egui::Id::NULL;
+            let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+                let mut bar = Bar::new(ui, "presets", H_BAR);
+                let _pick = bar.rest("pick", 90.0);
+                let _name = bar.cell("name", 60.0);
+                if delete_cell {
+                    let _delete = bar.cell("delete", 30.0);
+                }
+                after = ui.button("whatever comes next").id;
+            });
+            ids.push(after);
+        }
+        assert_eq!(
+            ids[0], ids[1],
+            "the delete cell coming and going renames every widget after the bar"
+        );
+
+        // And the mechanism itself, asserted directly, so this test cannot
+        // quietly stop testing anything: an extra `new_child` on the caller's own
+        // `Ui` *does* rename what follows it. If an egui upgrade ever stops
+        // folding the parent's child count into later ids, the guard above has
+        // nothing left to catch and `Bar` can go back to being simpler.
+        let mut naive = Vec::new();
+        for extra_child in [true, false] {
+            let mut after = egui::Id::NULL;
+            let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+                if extra_child {
+                    let _ = ui.new_child(egui::UiBuilder::new().id_salt("extra"));
+                }
+                after = ui.button("whatever comes next").id;
+            });
+            naive.push(after);
+        }
+        assert_ne!(
+            naive[0], naive[1],
+            "egui no longer renames later widgets, so this whole guard is obsolete"
         );
     }
 

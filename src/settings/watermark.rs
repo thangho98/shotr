@@ -1,37 +1,8 @@
-//! Where the watermark sits and how it is set.
+//! How the watermark is set.
 
 use crate::i18n::t;
 
 use serde::{Deserialize, Serialize};
-
-/// The classic nine-square grid — every watermarking tool offers this because a
-/// mark that clashes with the subject just needs to move to a quieter corner.
-#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Debug)]
-pub enum WatermarkPos {
-    TopLeft,
-    Top,
-    TopRight,
-    Left,
-    Center,
-    Right,
-    BottomLeft,
-    Bottom,
-    BottomRight,
-}
-
-impl WatermarkPos {
-    pub const ALL: [WatermarkPos; 9] = [
-        WatermarkPos::TopLeft,
-        WatermarkPos::Top,
-        WatermarkPos::TopRight,
-        WatermarkPos::Left,
-        WatermarkPos::Center,
-        WatermarkPos::Right,
-        WatermarkPos::BottomLeft,
-        WatermarkPos::Bottom,
-        WatermarkPos::BottomRight,
-    ];
-}
 
 /// How the wordmark is set. Each exists to stay readable over a different kind
 /// of background — plain text disappears over busy pixels, which is the one

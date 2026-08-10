@@ -24,11 +24,7 @@ use crate::wallpaper;
 
 impl ShotrApp {
     pub(super) fn sidebar(&mut self, ui: &mut egui::Ui) {
-        let width = ui.available_width();
-        if ui
-            .add(egui::Button::new(t("Capture again")).min_size(egui::vec2(width, 27.0)))
-            .clicked()
-        {
+        if theme::primary_button(ui, t("Capture again")).clicked() {
             self.start_capture(self.source);
         }
 
@@ -93,11 +89,16 @@ impl ShotrApp {
 
         ui.add_space(4.0);
         if !self.windows.is_empty() {
-            ui.horizontal(|ui| {
-                ui.selectable_value(&mut self.pick_mode, PickMode::Region, t("Region"));
-                ui.selectable_value(&mut self.pick_mode, PickMode::Window, t("Window"));
-                ui.label(egui::RichText::new("Space").weak().small());
-            });
+            theme::segmented(
+                ui,
+                "pick-mode",
+                &mut self.pick_mode,
+                &[
+                    (PickMode::Region, t("Region")),
+                    (PickMode::Window, t("Window")),
+                ],
+            );
+            theme::hint(ui, "Space");
         }
 
         ui.add_space(4.0);
@@ -225,98 +226,170 @@ impl ShotrApp {
         self.section_fold(ui, Section::Export, t("Export"), |s, ui| s.export_section(ui));
 
         ui.add_space(12.0);
-        if ui.button(t("Reset to defaults")).clicked() {
+        if theme::ghost_button(ui, t("Reset to defaults")).clicked() {
             self.style = Style::default();
         }
         ui.add_space(16.0);
     }
 
     fn layout_section(&mut self, ui: &mut egui::Ui) {
-        let s = &mut self.style;
-        theme::slider_label(ui, t("Padding"), s.padding);
-        ui.add(egui::Slider::new(&mut s.padding, 0..=400).show_value(false));
-        theme::slider_label(ui, t("Border radius"), s.radius);
-        ui.add(egui::Slider::new(&mut s.radius, 0..=120).show_value(false));
-        theme::slider_label(ui, t("Add a shadow"), s.shadow);
-        ui.add(egui::Slider::new(&mut s.shadow, 0..=100).show_value(false));
+        theme::card(ui, |ui| {
+            let s = &mut self.style;
+            theme::slider_row(ui, t("Padding"), &mut s.padding, 0..=400, "");
+            theme::slider_row(ui, t("Radius"), &mut s.radius, 0..=120, "");
+            theme::slider_row(ui, t("Shadow"), &mut s.shadow, 0..=100, "");
+            theme::rule(ui);
 
-        ui.horizontal(|ui| {
-            ui.label(t("Inset"));
-            if s.inset_auto_color {
-                match self.detected_inset {
-                    Some(_) => ui.label(
-                        egui::RichText::new(t("(background colour detected)"))
-                            .weak()
-                            .small(),
-                    ),
-                    None => ui.label(
-                        egui::RichText::new(t("(no background colour found)"))
-                            .weak()
-                            .small(),
-                    ),
-                };
-            }
-        });
-        let s = &mut self.style;
-        ui.horizontal(|ui| {
-            ui.add(egui::Slider::new(&mut s.inset, 0..=80).show_value(true));
-            // The swatch shows what is actually being drawn, and touching it is
-            // how you take the colour back off auto.
-            let mut shown = match (s.inset_auto_color, self.detected_inset) {
-                (true, Some(c)) => c,
-                _ => s.inset_color,
-            };
-            let before = shown;
-            color_button(ui, &mut shown);
-            if shown != before {
-                s.inset_color = shown;
-                s.inset_auto_color = false;
-            }
-            if !s.inset_auto_color && ui.small_button("auto").clicked() {
-                s.inset_auto_color = true;
-            }
-        });
-        // Only means anything while the colour is being detected, so it is only
-        // offered then — and only once there is an inset to drop.
-        if s.inset_auto_color && s.inset > 0 {
-            ui.checkbox(
-                &mut s.inset_only_if_detected,
-                t("Only when a colour is found"),
-            )
-            .on_hover_text(t(
-                "Leave the inset off rather than falling back to a plain colour.",
-            ));
-        }
-        ui.checkbox(&mut s.balance, t("Balance"))
-            .on_hover_text(t("Trim uniform edges so the subject sits centred"));
-    }
-
-    fn ratio_section(&mut self, ui: &mut egui::Ui) {
-        self.ratio_chips(ui);
-        ui.horizontal(|ui| {
-            let is_custom =
-                self.style.ratio == Ratio::Size(self.style.custom_size.0, self.style.custom_size.1);
-            if ui.selectable_label(is_custom, t("Custom…")).clicked() {
-                self.show_custom_size = !self.show_custom_size;
-                if self.show_custom_size {
-                    let (w, h) = self.style.custom_size;
-                    self.style.ratio = Ratio::Size(w, h);
-                }
-            }
-        });
-        if self.show_custom_size {
+            // The inset carries a colour, so its row spends the number box's
+            // width on the swatch and on the way back to automatic instead.
             ui.horizontal(|ui| {
-                let (mut w, mut h) = self.style.custom_size;
-                ui.label("W");
-                let a = ui.add(egui::DragValue::new(&mut w).range(64..=8000).speed(4));
-                ui.label("H");
-                let b = ui.add(egui::DragValue::new(&mut h).range(64..=8000).speed(4));
-                if a.changed() || b.changed() {
-                    self.style.custom_size = (w, h);
-                    self.style.ratio = Ratio::Size(w, h);
+                ui.spacing_mut().item_spacing.x = theme::ROW_GAP;
+                theme::row_label(ui, t("Inset"));
+                // Keep width back for what comes after the rail, and only for
+                // what is actually going to be drawn: the `auto` button appears
+                // exactly when the colour is *not* automatic, and reserving for
+                // it the other way round overflows the card by its own width the
+                // moment the swatch is touched.
+                //
+                // Its width is measured, not guessed. "auto" is 34pt and
+                // "tự động" is half again as wide, so a constant fits in English
+                // and overflows the card in Vietnamese — where the overflow does
+                // not merely clip, it widens the scroll area and cuts off every
+                // row below.
+                const W_SWATCH: f32 = 22.0;
+                let mut keep = W_SWATCH + theme::ROW_GAP;
+                if !s.inset_auto_color {
+                    keep += theme::text_button_width(ui, t("auto"), 11.0) + theme::ROW_GAP;
+                }
+                let rail_w = (ui.available_width() - keep).max(48.0);
+                theme::rail(ui, rail_w, &mut s.inset, &(0..=80));
+                // The swatch shows what is actually being drawn, and touching it
+                // is how you take the colour back off auto.
+                let mut shown = match (s.inset_auto_color, self.detected_inset) {
+                    (true, Some(c)) => c,
+                    _ => s.inset_color,
+                };
+                let before = shown;
+                color_button(ui, &mut shown, 22.0);
+                if shown != before {
+                    s.inset_color = shown;
+                    s.inset_auto_color = false;
+                }
+                if !s.inset_auto_color
+                    && ui
+                        .add(egui::Button::new(
+                            egui::RichText::new(t("auto")).size(11.0).color(theme::ACCENT),
+                        ))
+                        .clicked()
+                {
+                    s.inset_auto_color = true;
                 }
             });
-        }
+            if s.inset_auto_color {
+                theme::hint(
+                    ui,
+                    match self.detected_inset {
+                        Some(_) => t("(background colour detected)"),
+                        None => t("(no background colour found)"),
+                    },
+                );
+            }
+
+            let s = &mut self.style;
+            // Only means anything while the colour is being detected, so it is
+            // only offered then — and only once there is an inset to drop.
+            if s.inset_auto_color && s.inset > 0 {
+                theme::checkbox(
+                    ui,
+                    &mut s.inset_only_if_detected,
+                    t("Only when a colour is found"),
+                )
+                .on_hover_text(t(
+                    "Leave the inset off rather than falling back to a plain colour.",
+                ));
+            }
+            theme::checkbox(ui, &mut s.balance, t("Balance"))
+                .on_hover_text(t("Trim uniform edges so the subject sits centred"));
+        });
+    }
+
+    /// Aspect ratios on a track, social sizes on a grid.
+    ///
+    /// A wrapped row of thirteen identical chips wraps unevenly at this width
+    /// and, worse, never says what "Reddit" means in pixels — which is the only
+    /// thing anyone picking it wants to know.
+    fn ratio_section(&mut self, ui: &mut egui::Ui) {
+        // `RATIO_PRESETS` is the source of truth for both lists: an entry added
+        // there has to appear here without this function being touched.
+        let aspects: Vec<(Ratio, &str)> = RATIO_PRESETS
+            .iter()
+            .filter(|p| !matches!(p.ratio, Ratio::Size(..)))
+            .map(|p| (p.ratio, p.name))
+            .collect();
+        theme::segmented(ui, "ratio-aspect", &mut self.style.ratio, &aspects);
+
+        ui.add_space(6.0);
+        theme::section(ui, t("Social sizes"));
+        ui.add_space(3.0);
+
+        const COLS: usize = 2;
+        const GAP: f32 = 6.0;
+        let chip_w = ((ui.available_width() - GAP * (COLS - 1) as f32) / COLS as f32).floor();
+        let socials: Vec<&crate::settings::RatioPreset> = RATIO_PRESETS
+            .iter()
+            .filter(|p| matches!(p.ratio, Ratio::Size(..)))
+            .collect();
+        egui::Grid::new("ratio-socials")
+            .num_columns(COLS)
+            .spacing([GAP, GAP])
+            .show(ui, |ui| {
+                for (i, preset) in socials.iter().enumerate() {
+                    let Ratio::Size(w, h) = preset.ratio else {
+                        continue;
+                    };
+                    let on = self.style.ratio == preset.ratio;
+                    if theme::chip(ui, chip_w, on, preset.name, &format!("{w}×{h}")).clicked() {
+                        self.style.ratio = preset.ratio;
+                    }
+                    if (i + 1) % COLS == 0 {
+                        ui.end_row();
+                    }
+                }
+            });
+
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            theme::row_label(ui, t("Custom"));
+            let (mut w, mut h) = self.style.custom_size;
+            let changed = theme::field(ui, theme::RADIUS_SMALL, |ui| {
+                let a = ui.add_sized(
+                    egui::vec2(64.0, 24.0),
+                    egui::DragValue::new(&mut w).range(64..=8000).speed(4),
+                );
+                ui.label(egui::RichText::new("×").size(12.0).color(theme::pal().text_dim));
+                let b = ui.add_sized(
+                    egui::vec2(64.0, 24.0),
+                    egui::DragValue::new(&mut h).range(64..=8000).speed(4),
+                );
+                ui.label(egui::RichText::new("px").size(12.0).color(theme::pal().text_dim));
+                a.changed() || b.changed()
+            });
+            // Typing a size is how the custom ratio gets chosen; there is no
+            // separate switch, because a size nobody selected does nothing.
+            if changed {
+                self.style.custom_size = (w, h);
+                self.style.ratio = Ratio::Size(w, h);
+            }
+        });
+
+        ui.add_space(3.0);
+        theme::hint(
+            ui,
+            match self.style.ratio {
+                Ratio::Auto => t("Auto grows the canvas to fit the shot plus its padding."),
+                _ => t("The shot is fitted inside the pinned canvas."),
+            },
+        );
     }
 
 
@@ -326,121 +399,141 @@ impl ShotrApp {
     /// wordmark or a logo, anchored on a nine-square grid or tiled across the
     /// whole picture, with size, angle and opacity on their own dials.
     fn watermark_section(&mut self, ui: &mut egui::Ui) {
-        ui.checkbox(&mut self.style.watermark, t("Enable watermark"));
-        if !self.style.watermark {
-            return;
-        }
-
-        // --- what to stamp -------------------------------------------------
-        let has_logo = self.style.watermark_image.is_some();
-        ui.horizontal(|ui| {
-            if ui.selectable_label(!has_logo, t("Text")).clicked() {
-                self.style.watermark_image = None;
+        theme::card(ui, |ui| {
+            theme::checkbox(ui, &mut self.style.watermark, t("Enable watermark"));
+            if !self.style.watermark {
+                return;
             }
-            if ui.selectable_label(has_logo, t("Logo image")).clicked() && !has_logo
-                && let Some(p) = export::open_image_dialog() {
-                    self.style.watermark_image = Some(p);
-                }
-        });
 
-        match self.style.watermark_image.clone() {
-            Some(path) => {
-                let name = path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_default();
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new(name).weak().small());
-                    if ui.small_button(t("Change…")).clicked()
-                        && let Some(p) = export::open_image_dialog()
+            // --- what to stamp ---------------------------------------------
+            let has_logo = self.style.watermark_image.is_some();
+            let mut logo = has_logo;
+            if theme::segmented(
+                ui,
+                "wm-kind",
+                &mut logo,
+                &[(false, t("Text")), (true, t("Logo image"))],
+            ) {
+                if logo {
+                    // Asked for a logo with none chosen: the dialog is the whole
+                    // point of the choice, so it opens here rather than later.
+                    match export::open_image_dialog() {
+                        Some(p) => self.style.watermark_image = Some(p),
+                        None => self.style.watermark_image = None,
+                    }
+                } else {
+                    self.style.watermark_image = None;
+                }
+            }
+
+            match self.style.watermark_image.clone() {
+                Some(path) => {
+                    let name = path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    ui.horizontal(|ui| {
+                        theme::hint(ui, name);
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.button(t("Change…")).clicked()
+                                && let Some(p) = export::open_image_dialog()
+                            {
+                                self.style.watermark_image = Some(p);
+                            }
+                        });
+                    });
+                }
+                None => {
+                    const W_COPY: f32 = 30.0;
+                    let mut bar = theme::Bar::new(ui, "wm-text", theme::H_BAR_CARD);
                     {
-                        self.style.watermark_image = Some(p);
+                        let mut cell = bar.rest("wm-text", W_COPY);
+                        cell.add(
+                            egui::TextEdit::singleline(&mut self.style.watermark_text)
+                                .hint_text("Enter text")
+                                .frame(theme::welded_field())
+                                .vertical_align(egui::Align::Center)
+                                .desired_width(f32::INFINITY),
+                        );
                     }
-                });
-            }
-            None => {
-                ui.horizontal(|ui| {
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.style.watermark_text)
-                            .hint_text("Enter text")
-                            .desired_width(ui.available_width() - 34.0),
-                    );
-                    if ui.small_button("©").on_hover_text("Chèn ký hiệu bản quyền").clicked() {
-                        self.style.watermark_text.insert(0, '©');
-                        self.style.watermark_text.insert(1, ' ');
+                    {
+                        let mut cell = bar.cell("wm-copy", W_COPY);
+                        let size = cell.available_size();
+                        if cell
+                            .add(egui::Button::new("©").min_size(size))
+                            .on_hover_text("Chèn ký hiệu bản quyền")
+                            .clicked()
+                        {
+                            self.style.watermark_text.insert(0, '©');
+                            self.style.watermark_text.insert(1, ' ');
+                        }
                     }
-                });
 
-                ui.horizontal_wrapped(|ui| {
-                    for style in crate::settings::WatermarkStyle::ALL {
-                        ui.selectable_value(&mut self.style.watermark_style, style, style.label());
-                    }
-                });
-                ui.horizontal(|ui| {
-                    ui.label(t("Text colour"));
-                    color_button(ui, &mut self.style.watermark_color);
-                });
-            }
-        }
-
-        // --- where to put it -----------------------------------------------
-        ui.add_space(4.0);
-        ui.checkbox(&mut self.style.watermark_tiled, t("Tile across the image"))
-            .on_hover_text("Repeat diagonally across the image — the anti-reuse look");
-
-        if !self.style.watermark_tiled {
-            ui.label(egui::RichText::new(t("Position")).weak().small());
-            // The nine-square grid, laid out as it reads.
-            egui::Grid::new("wm-pos").spacing([4.0, 4.0]).show(ui, |ui| {
-                for (i, pos) in crate::settings::WatermarkPos::ALL.into_iter().enumerate() {
-                    let on = self.style.watermark_pos == pos;
-                    if ui.add(egui::Button::new(if on { "●" } else { "○" }).min_size(egui::vec2(28.0, 22.0)).selected(on)).clicked() {
-                        self.style.watermark_pos = pos;
-                    }
-                    if (i + 1) % 3 == 0 {
-                        ui.end_row();
-                    }
+                    let styles: Vec<(crate::settings::WatermarkStyle, &str)> =
+                        crate::settings::WatermarkStyle::ALL
+                            .into_iter()
+                            .map(|s| (s, s.label()))
+                            .collect();
+                    theme::segmented(ui, "wm-style", &mut self.style.watermark_style, &styles);
+                    ui.horizontal(|ui| {
+                        theme::row_label(ui, t("Text colour"));
+                        color_button(ui, &mut self.style.watermark_color, 22.0);
+                    });
                 }
-            });
-        }
+            }
 
-        // --- how it looks ---------------------------------------------------
-        theme::slider_label(ui, t("Size"), format!("{:.0}%", self.style.watermark_size * 100.0));
-        ui.add(egui::Slider::new(&mut self.style.watermark_size, 0.4..=4.0).show_value(false));
+            // Nothing chooses *where* any more: the mark sits under the shot,
+            // sharing its right edge. There is no anchor to pick and nothing to
+            // tile, so the nine-square grid and the tiling switch are gone.
 
-        let pct = (self.style.watermark_opacity as f32 / 255.0 * 100.0).round() as u8;
-        theme::slider_label(ui, t("Opacity"), format!("{pct}%"));
-        let mut p = pct;
-        if ui.add(egui::Slider::new(&mut p, 5..=100).show_value(false)).changed() {
-            self.style.watermark_opacity = (p as f32 / 100.0 * 255.0).round() as u8;
-        }
-
-        theme::slider_label(ui, t("Angle"), format!("{:.0}°", self.style.watermark_angle));
-        ui.add(egui::Slider::new(&mut self.style.watermark_angle, -90.0..=90.0).show_value(false));
-        if self.style.watermark_tiled {
-            ui.label(
-                egui::RichText::new(t("Protective tiling is usually 20–40% opacity at -30°."))
-                    .weak()
-                    .small(),
-            );
-        }
+            // --- how it looks -----------------------------------------------
+            // Stored as a multiplier, a byte and a float; read as whole
+            // percentages and whole degrees, which is what the box has to show —
+            // a rail handing 137.4193% to a number box is unreadable.
+            let mut size_pct = (self.style.watermark_size * 100.0).round() as u32;
+            if theme::slider_row(ui, t("Size"), &mut size_pct, 40..=400, "%") {
+                self.style.watermark_size = size_pct as f32 / 100.0;
+            }
+            let mut opacity_pct =
+                (f32::from(self.style.watermark_opacity) / 255.0 * 100.0).round() as u32;
+            if theme::slider_row(ui, t("Opacity"), &mut opacity_pct, 5..=100, "%") {
+                self.style.watermark_opacity = (opacity_pct as f32 / 100.0 * 255.0).round() as u8;
+            }
+            let mut angle = self.style.watermark_angle.round() as i32;
+            if theme::slider_row(ui, t("Angle"), &mut angle, -90..=90, "°") {
+                self.style.watermark_angle = angle as f32;
+            }
+            theme::hint(ui, t("Sits under the shot, sharing its right edge."));
+        });
     }
 
-    /// Presets on one row: pick, name, save — the design puts them there
-    /// because they are one thought, not three sections.
+    /// Presets on one row: pick, name, save — the design welds them into one
+    /// bar because they are one thought, not three sections.
     fn preset_row(&mut self, ui: &mut egui::Ui) {
+        const W_SAVE: f32 = 46.0;
+        const W_DELETE: f32 = 30.0;
+
         let mut apply: Option<usize> = None;
         let mut delete: Option<usize> = None;
         let matching = self.presets.iter().position(|p| p.style == self.style);
 
-        ui.horizontal(|ui| {
+        // Picking a preset and naming one are the same size of decision, so the
+        // combo and the field get the same width rather than a flexible one and
+        // a fixed one.
+        let fixed = W_SAVE + if matching.is_some() { W_DELETE } else { 0.0 };
+        let half = ((ui.available_width() - fixed) / 2.0).floor().max(48.0);
+
+        let mut bar = theme::Bar::new(ui, "presets", theme::H_BAR);
+        {
+            let mut cell = bar.rest("preset-pick", fixed + half);
             let selected = matching
                 .map(|i| self.presets[i].name.clone())
                 .unwrap_or_else(|| "—".to_string());
+            let width = cell.available_width();
             egui::ComboBox::from_id_salt("preset")
                 .selected_text(selected)
-                .width(126.0)
-                .show_ui(ui, |ui| {
+                .width(width)
+                .show_ui(&mut cell, |ui| {
                     if self.presets.is_empty() {
                         ui.label(egui::RichText::new(t("(no presets yet)")).weak());
                     }
@@ -450,24 +543,36 @@ impl ShotrApp {
                         }
                     }
                 });
-
-            ui.add(
+        }
+        {
+            let mut cell = bar.cell("preset-name", half);
+            let height = cell.available_height();
+            cell.add_sized(
+                egui::vec2(half, height),
                 egui::TextEdit::singleline(&mut self.preset_name)
                     .hint_text(t("Preset name"))
-                    .desired_width(84.0),
+                    .frame(theme::welded_field())
+                    .vertical_align(egui::Align::Center),
             );
-            if ui.button(t("Save")).clicked() {
+        }
+        {
+            let mut cell = bar.cell("preset-save", W_SAVE);
+            let size = cell.available_size();
+            if cell.add(egui::Button::new(t("Save")).min_size(size)).clicked() {
                 self.save_preset();
             }
-            if matching.is_some()
-                && ui
-                    .small_button("🗑")
-                    .on_hover_text(t("Delete the preset that matches"))
-                    .clicked()
+        }
+        if matching.is_some() {
+            let mut cell = bar.cell("preset-delete", W_DELETE);
+            let size = cell.available_size();
+            if cell
+                .add(egui::Button::new("🗑").min_size(size))
+                .on_hover_text(t("Delete the preset that matches"))
+                .clicked()
             {
                 delete = matching;
             }
-        });
+        }
 
         if let Some(i) = apply {
             self.style = self.presets[i].style.clone();
@@ -489,8 +594,11 @@ impl ShotrApp {
         // it and clips every row below.
         const COLS: usize = 5;
         const GAP: f32 = 6.0;
-        let pad = ui.spacing().button_padding.x * 2.0;
-        let side = grid_cell_side(ui.available_width(), COLS, GAP, pad);
+        // No button padding to subtract any more: a swatch is the gradient and
+        // nothing else — no frame, no inset — so the whole cell is image. The
+        // gradients are what the grid is for, and a border round each one turned
+        // twenty-three of them into twenty-three boxes.
+        let side = grid_cell_side(ui.available_width(), COLS, GAP, 0.0);
 
         egui::Grid::new("bg-grid")
             .num_columns(COLS)
@@ -498,13 +606,7 @@ impl ShotrApp {
             .show(ui, |ui| {
                 for (i, (sw, tex)) in swatches.iter().enumerate() {
                     let selected = self.style.background == sw.background();
-                    let img = egui::Image::new(egui::load::SizedTexture::new(
-                        tex.id(),
-                        egui::vec2(side, side),
-                    ));
-                    let resp = ui
-                        .add(egui::Button::image(img).selected(selected).corner_radius(6))
-                        .on_hover_text(sw.label());
+                    let resp = theme::swatch(ui, tex, side, selected).on_hover_text(sw.label());
                     if resp.clicked() {
                         picked = Some(*sw);
                     }
@@ -528,113 +630,125 @@ impl ShotrApp {
             }
         }
 
-        if self.style.background == Background::Custom {
-            ui.add_space(4.0);
-            let c = &mut self.style.custom_bg;
-            ui.horizontal(|ui| {
-                ui.selectable_value(&mut c.kind, CustomKind::Solid, t("Solid colour"));
-                ui.selectable_value(&mut c.kind, CustomKind::Linear, "Gradient");
-                ui.selectable_value(&mut c.kind, CustomKind::Image, t("Image"));
-            });
-            match c.kind {
-                CustomKind::Solid => {
-                    ui.horizontal(|ui| {
-                        ui.label(t("Colour"));
-                        color_button(ui, &mut c.color_a);
-                    });
-                }
-                CustomKind::Linear => {
-                    ui.horizontal(|ui| {
-                        ui.label("A");
-                        color_button(ui, &mut c.color_a);
-                        ui.label("B");
-                        color_button(ui, &mut c.color_b);
-                    });
-                    ui.add(egui::Slider::new(&mut c.angle, 0.0..=360.0).text("Corner"));
-                }
-                CustomKind::Image => {
-                    let label = c
-                        .image
-                        .as_ref()
-                        .and_then(|p| p.file_name())
-                        .map(|n| n.to_string_lossy().to_string())
-                        .unwrap_or_else(|| "Chọn ảnh nền…".to_string());
-                    if ui.button(label).clicked()
-                        && let Some(p) = export::open_image_dialog()
-                    {
-                        c.image = Some(p);
-                    }
-                }
-            }
-        }
-    }
-
-    fn ratio_chips(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal_wrapped(|ui| {
-            for preset in RATIO_PRESETS {
-                let selected = self.style.ratio == preset.ratio;
-                let hint = match preset.ratio {
-                    Ratio::Size(w, h) => format!("{w} × {h}"),
-                    _ => preset.name.to_string(),
-                };
-                if ui
-                    .selectable_label(selected, preset.name)
-                    .on_hover_text(hint)
-                    .clicked()
-                {
-                    self.style.ratio = preset.ratio;
-                }
+        // What was chosen, in words: nineteen gradients look alike at 40px, and
+        // Auto and Desktop are not fixed colours at all.
+        let current = swatch_order()
+            .into_iter()
+            .find(|sw| sw.background() == self.style.background);
+        ui.add_space(3.0);
+        ui.horizontal(|ui| {
+            theme::hint(ui, current.map(Swatch::label).unwrap_or_default());
+            let note = match current {
+                Some(Swatch::Auto) => t("built from the shot"),
+                Some(Swatch::Desktop) => t("current wallpaper"),
+                _ => "",
+            };
+            if !note.is_empty() {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    theme::hint(ui, note);
+                });
             }
         });
+
+        if self.style.background == Background::Custom {
+            ui.add_space(6.0);
+            theme::card(ui, |ui| {
+                let c = &mut self.style.custom_bg;
+                theme::segmented(
+                    ui,
+                    "custom-bg",
+                    &mut c.kind,
+                    &[
+                        (CustomKind::Solid, t("Solid colour")),
+                        (CustomKind::Linear, "Gradient"),
+                        (CustomKind::Image, t("Image")),
+                    ],
+                );
+                match c.kind {
+                    CustomKind::Solid => {
+                        ui.horizontal(|ui| {
+                            theme::row_label(ui, t("Colour"));
+                            color_button(ui, &mut c.color_a, 22.0);
+                        });
+                    }
+                    CustomKind::Linear => {
+                        ui.horizontal(|ui| {
+                            theme::row_label(ui, t("Colours"));
+                            color_button(ui, &mut c.color_a, 22.0);
+                            color_button(ui, &mut c.color_b, 22.0);
+                        });
+                        let mut angle = c.angle.round() as i32;
+                        if theme::slider_row(ui, t("Corner"), &mut angle, 0..=360, "°") {
+                            c.angle = angle as f32;
+                        }
+                    }
+                    CustomKind::Image => {
+                        let label = c
+                            .image
+                            .as_ref()
+                            .and_then(|p| p.file_name())
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_else(|| "Chọn ảnh nền…".to_string());
+                        if ui.button(label).clicked()
+                            && let Some(p) = export::open_image_dialog()
+                        {
+                            c.image = Some(p);
+                        }
+                    }
+                }
+            });
+        }
     }
 
     fn export_section(&mut self, ui: &mut egui::Ui) {
-        ui.label("Xuất file");
-        let s = &mut self.prefs;
-        ui.horizontal(|ui| {
-            for f in ExportFormat::ALL {
-                ui.selectable_value(&mut s.format, f, f.label());
-            }
-        });
-        match s.format {
-            ExportFormat::Jpeg => {
-                ui.add(egui::Slider::new(&mut s.jpeg_quality, 40..=100).text("Quality"));
-                ui.label(
-                    egui::RichText::new(
+        theme::card(ui, |ui| {
+            let s = &mut self.prefs;
+            let formats: Vec<(ExportFormat, &str)> =
+                ExportFormat::ALL.into_iter().map(|f| (f, f.label())).collect();
+            theme::segmented(ui, "export-format", &mut s.format, &formats);
+
+            match s.format {
+                ExportFormat::Jpeg => {
+                    theme::slider_row(ui, t("Quality"), &mut s.jpeg_quality, 40..=100, "");
+                    theme::hint(
+                        ui,
                         t("JPEG has no alpha channel — a transparent background becomes white."),
-                    )
-                    .weak()
-                    .small(),
-                );
+                    );
+                }
+                ExportFormat::Png => {
+                    theme::checkbox(
+                        ui,
+                        &mut s.png_max_compression,
+                        t("Maximum compression (slower)"),
+                    );
+                }
+                ExportFormat::Webp => {
+                    theme::hint(ui, t("WebP is lossless here, so there is no quality slider."));
+                }
             }
-            ExportFormat::Png => {
-                ui.checkbox(&mut s.png_max_compression, t("Maximum compression (slower)"));
-            }
-            ExportFormat::Webp => {
-                ui.label(
-                    egui::RichText::new(t("WebP is lossless here, so there is no quality slider."))
-                        .weak()
-                        .small(),
-                );
-            }
-        }
-        ui.horizontal(|ui| {
-            ui.label(t("Filename"));
-            ui.add(
-                egui::TextEdit::singleline(&mut s.filename_template)
-                    .hint_text("shotr-{date}-{time}")
-                    .desired_width(f32::INFINITY),
+
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = theme::ROW_GAP;
+                theme::row_label(ui, t("Filename"));
+                theme::field(ui, theme::RADIUS_SMALL, |ui| {
+                    ui.add_sized(
+                        egui::vec2(ui.available_width(), theme::H_BAR_CARD),
+                        egui::TextEdit::singleline(&mut s.filename_template)
+                            .hint_text("shotr-{date}-{time}")
+                            .vertical_align(egui::Align::Center)
+                            .margin(egui::Margin::symmetric(theme::FIELD_PAD, 0)),
+                    );
+                });
+            });
+            theme::hint(
+                ui,
+                format!(
+                    "→ {}.{}",
+                    crate::export::expand_template(&s.filename_template, 1_700_000_000),
+                    s.format.extension()
+                ),
             );
         });
-        ui.label(
-            egui::RichText::new(format!(
-                "→ {}.{}",
-                crate::export::expand_template(&s.filename_template, 1_700_000_000),
-                s.format.extension()
-            ))
-            .weak()
-            .small(),
-        );
     }
 
     fn ocr_body(&mut self, ui: &mut egui::Ui) {
@@ -685,89 +799,93 @@ impl ShotrApp {
             OcrState::Ready => {}
         }
 
-        if self.ocr_words.is_empty() {
-            ui.label(egui::RichText::new(t("No text found.")).weak().small());
-        }
-        // Say which engine read the image: the two differ on Vietnamese badly
-        // enough that a user seeing mangled diacritics needs to know why.
-        match crate::ocr::tesseract::best_langs() {
-            Some(langs) => {
-                let msg = tf("Read with tesseract ({langs})", &[("langs", &langs)]);
-                ui.label(egui::RichText::new(msg).weak().small());
+        theme::card(ui, |ui| {
+            if self.ocr_words.is_empty() {
+                theme::hint(ui, t("No text found."));
             }
-            None => {
-                ui.label(
-                    egui::RichText::new(t("Read with ocrs — no Vietnamese diacritics."))
-                        .weak()
-                        .small(),
-                );
+            // Say which engine read the image: the two differ on Vietnamese badly
+            // enough that a user seeing mangled diacritics needs to know why.
+            match crate::ocr::tesseract::best_langs() {
+                Some(langs) => theme::hint(
+                    ui,
+                    tf("Read with tesseract ({langs})", &[("langs", &langs)]),
+                ),
+                None => theme::hint(ui, t("Read with ocrs — no Vietnamese diacritics.")),
             }
-        }
 
-        let found = self.active_finding_count();
-        ui.checkbox(
-            &mut self.prefs.redact,
-            tf("Redact sensitive data ({found} found)", &[("found", &found.to_string())]),
-        );
+            let found = self.active_finding_count();
+            theme::checkbox(
+                ui,
+                &mut self.prefs.redact,
+                &tf(
+                    "Redact sensitive data ({found} found)",
+                    &[("found", &found.to_string())],
+                ),
+            );
 
-        if self.prefs.redact {
-            let counts = [
-                self.count_of(Secret::Email),
-                self.count_of(Secret::CreditCard),
-                self.count_of(Secret::IpAddress),
-                self.count_of(Secret::ApiKey),
-                self.count_of(Secret::Phone),
-            ];
-            ui.indent("redact-kinds", |ui| {
-                let s = &mut self.prefs;
-                for (flag, kind, n) in [
-                    (&mut s.redact_email, Secret::Email, counts[0]),
-                    (&mut s.redact_card, Secret::CreditCard, counts[1]),
-                    (&mut s.redact_ip, Secret::IpAddress, counts[2]),
-                    (&mut s.redact_key, Secret::ApiKey, counts[3]),
-                    (&mut s.redact_phone, Secret::Phone, counts[4]),
-                ] {
-                    ui.checkbox(flag, format!("{} ({n})", kind.label()));
-                }
-            });
+            if self.prefs.redact {
+                let counts = [
+                    self.count_of(Secret::Email),
+                    self.count_of(Secret::CreditCard),
+                    self.count_of(Secret::IpAddress),
+                    self.count_of(Secret::ApiKey),
+                    self.count_of(Secret::Phone),
+                ];
+                ui.indent("redact-kinds", |ui| {
+                    ui.spacing_mut().item_spacing.y = theme::ROW_GAP;
+                    let s = &mut self.prefs;
+                    for (flag, kind, n) in [
+                        (&mut s.redact_email, Secret::Email, counts[0]),
+                        (&mut s.redact_card, Secret::CreditCard, counts[1]),
+                        (&mut s.redact_ip, Secret::IpAddress, counts[2]),
+                        (&mut s.redact_key, Secret::ApiKey, counts[3]),
+                        (&mut s.redact_phone, Secret::Phone, counts[4]),
+                    ] {
+                        theme::checkbox(ui, flag, &format!("{} ({n})", kind.label()));
+                    }
+                });
 
-            ui.horizontal(|ui| {
-                ui.selectable_value(
+                theme::segmented(
+                    ui,
+                    "redact-style",
                     &mut self.style.redact_style,
-                    RedactStyle::Solid,
-                    t("Solid"),
+                    &[
+                        (RedactStyle::Solid, t("Solid")),
+                        (RedactStyle::Blur, t("Blur")),
+                    ],
                 );
-                ui.selectable_value(&mut self.style.redact_style, RedactStyle::Blur, t("Blur"));
-            });
-            match self.style.redact_style {
-                RedactStyle::Solid => {
-                    ui.horizontal(|ui| {
-                        ui.label(t("Redaction colour"));
-                        color_button(ui, &mut self.style.redact_color);
-                    });
-                }
-                RedactStyle::Blur => {
-                    ui.add(
-                        egui::Slider::new(&mut self.style.redact_blur, 2.0..=60.0).text("Blur amount"),
-                    );
+                match self.style.redact_style {
+                    RedactStyle::Solid => {
+                        ui.horizontal(|ui| {
+                            theme::row_label(ui, t("Colour"));
+                            color_button(ui, &mut self.style.redact_color, 22.0);
+                        });
+                    }
+                    RedactStyle::Blur => {
+                        let mut blur = self.style.redact_blur.round() as i32;
+                        if theme::slider_row(ui, t("Blur amount"), &mut blur, 2..=60, "") {
+                            self.style.redact_blur = blur as f32;
+                        }
+                    }
                 }
             }
-        }
 
-        ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            ui.selectable_value(&mut self.ocr_mode, OcrMode::Off, t("Off"));
-            ui.selectable_value(&mut self.ocr_mode, OcrMode::SelectText, t("Select text"));
-            ui.selectable_value(&mut self.ocr_mode, OcrMode::ManualRedact, "Che tay");
+            theme::segmented(
+                ui,
+                "ocr-mode",
+                &mut self.ocr_mode,
+                &[
+                    (OcrMode::Off, t("Off")),
+                    (OcrMode::SelectText, t("Select text")),
+                    (OcrMode::ManualRedact, "Che tay"),
+                ],
+            );
         });
 
+        ui.add_space(6.0);
         match self.ocr_mode {
             OcrMode::SelectText => {
-                ui.label(
-                    egui::RichText::new(t("Drag on the image to select text."))
-                        .weak()
-                        .small(),
-                );
+                theme::hint(ui, t("Drag on the image to select text."));
                 ui.horizontal(|ui| {
                     let n = self.selected_words.len();
                     if ui
@@ -782,11 +900,7 @@ impl ShotrApp {
                 });
             }
             OcrMode::ManualRedact => {
-                ui.label(
-                    egui::RichText::new(t("Click a word to hide or reveal it."))
-                        .weak()
-                        .small(),
-                );
+                theme::hint(ui, t("Click a word to hide or reveal it."));
                 if !self.manual_redact.is_empty()
                     && ui
                         .button(tf("Hide {n} words", &[("n", &self.manual_redact.len().to_string())]))
@@ -839,9 +953,12 @@ impl ShotrApp {
 
 }
 
-pub(super) fn color_button(ui: &mut egui::Ui, color: &mut Rgba8) -> egui::Response {
+/// `side` is 22 for a button sharing a row with other controls and 24 for one
+/// standing on its own — egui takes the size from `interact_size`, which is
+/// shared, so it has to be passed rather than set.
+pub(super) fn color_button(ui: &mut egui::Ui, color: &mut Rgba8, side: f32) -> egui::Response {
     let mut c = egui::Color32::from_rgba_unmultiplied(color[0], color[1], color[2], color[3]);
-    let resp = ui.color_edit_button_srgba(&mut c);
+    let resp = theme::color_swatch(ui, &mut c, side);
     if resp.changed() {
         *color = c.to_srgba_unmultiplied();
     }
