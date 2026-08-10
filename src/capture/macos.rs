@@ -34,13 +34,19 @@ pub enum Shot {
 
 /// The exact command line for one source.
 ///
-/// `-x` silences the shutter, `-o` drops the window shadow and `-a` drops
-/// attached windows — the same flags the two shipping apps use.
+/// `-o` drops the window shadow and `-a` drops attached windows — the same
+/// flags the two shipping apps use.
 ///
-/// No `-r`: it was measured to change only the dpi metadata, never a pixel, and
+/// Deliberately **no** `-x`. That flag silences the shutter, and the shutter is
+/// the only thing that tells you a shot was taken: `--capture --copy` opens no
+/// window at all, and even the ordinary path fires while the editor has yet to
+/// appear. macOS plays it for every other screenshot on the machine, so its
+/// absence reads as the hotkey having missed.
+///
+/// No `-r` either: measured to change only the dpi metadata, never a pixel, and
 /// `export` re-encodes so the source dpi never reaches the output file.
 fn args(shot: Shot, out: &Path) -> Vec<String> {
-    let mut a = vec!["-x".to_string()];
+    let mut a: Vec<String> = Vec::new();
     match shot {
         // Region carries the window flags too, because space inside Apple's
         // overlay turns this very command into a window capture. Without `-o`
@@ -199,15 +205,33 @@ fn display_bounds(id: u32) -> (i32, i32, u32, u32) {
 mod tests {
     use super::*;
 
+    /// The shutter is the only feedback a capture gives.
+    ///
+    /// `--capture --copy` renders to the clipboard and exits without ever
+    /// opening a window, and even the ordinary path fires well before the
+    /// editor appears — so a silent `screencapture` is indistinguishable from a
+    /// hotkey that never fired. Every other screenshot on the machine makes the
+    /// sound; `-x` is what takes it away.
+    #[test]
+    fn every_capture_is_audible() {
+        let p = Path::new("/tmp/x.png");
+        for shot in [Shot::Region, Shot::Window, Shot::Display(0)] {
+            assert!(
+                !args(shot, p).iter().any(|a| a == "-x"),
+                "{shot:?} captures silently, which reads as nothing having happened"
+            );
+        }
+    }
+
     /// The flags are the whole contract with the system tool. `-o -a` vanishing
     /// would silently put window shadows back into every window capture.
     #[test]
     fn each_source_builds_its_own_command_line() {
         let p = Path::new("/tmp/x.png");
-        assert_eq!(args(Shot::Region, p), ["-x", "-i", "-o", "-a", "/tmp/x.png"]);
+        assert_eq!(args(Shot::Region, p), ["-i", "-o", "-a", "/tmp/x.png"]);
         assert_eq!(
             args(Shot::Window, p),
-            ["-x", "-i", "-W", "-o", "-a", "/tmp/x.png"]
+            ["-i", "-W", "-o", "-a", "/tmp/x.png"]
         );
         assert!(
             !args(Shot::Region, p).contains(&"-r".to_string()),
@@ -235,8 +259,8 @@ mod tests {
     #[test]
     fn display_numbering_is_one_based() {
         let p = Path::new("/tmp/x.png");
-        assert_eq!(args(Shot::Display(0), p), ["-x", "-D", "1", "/tmp/x.png"]);
-        assert_eq!(args(Shot::Display(2), p), ["-x", "-D", "3", "/tmp/x.png"]);
+        assert_eq!(args(Shot::Display(0), p), ["-D", "1", "/tmp/x.png"]);
+        assert_eq!(args(Shot::Display(2), p), ["-D", "3", "/tmp/x.png"]);
     }
 
     /// Escape out of Apple's overlay writes no file. That is a cancel, and must

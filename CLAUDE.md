@@ -186,6 +186,12 @@ from a terminal borrows the terminal's grant instead.
 a pixel, and `export` re-encodes so the source dpi never reaches the output file.
 It looks tidy to add. It does nothing.
 
+**No `-x` on `screencapture`.** It silences the shutter, and the shutter is the
+only feedback a capture gives: `--capture --copy` opens no window at all, and
+even the ordinary path fires before the editor appears. macOS plays it for every
+other screenshot on the machine, so its absence reads as the hotkey having
+missed.
+
 **Space turns a region capture into a window capture, so the region command line
 has to carry `-o` too.** It did not, and the shot came back with the window's own
 shadow baked in as a semi-transparent border — measured at 112/76/112/148px
