@@ -6,7 +6,7 @@ use crate::i18n::t;
 use eframe::egui;
 
 use super::{OcrMode, PickMode, ShotrApp, Zoom};
-use crate::annotate::{Layer, Tool};
+use crate::annotate::{Head, Layer, TextAlign, Tool};
 use crate::settings::Background;
 
 impl ShotrApp {
@@ -495,14 +495,7 @@ impl ShotrApp {
                             self.dirty = true;
                         }
                         None => {
-                            self.draft = Some(Layer::new(
-                                Tool::Text,
-                                at,
-                                self.ink(Tool::Text),
-                                self.annot_stroke,
-                                self.annot_font_size,
-                                self.annot_blur,
-                            ));
+                            self.draft = Some(self.new_layer(Tool::Text, at));
                             self.text_caret = 0;
                             self.text_before = None;
                         }
@@ -514,14 +507,7 @@ impl ShotrApp {
                 if resp.drag_started()
                     && let Some(p) = resp.interact_pointer_pos()
                 {
-                    self.draft = Some(Layer::new(
-                        tool,
-                        to_shot(p),
-                        self.ink(tool),
-                        self.annot_stroke,
-                        self.annot_font_size,
-                        self.annot_blur,
-                    ));
+                    self.draft = Some(self.new_layer(tool, to_shot(p)));
                 }
                 if resp.dragged()
                     && let Some(p) = resp.interact_pointer_pos()
@@ -837,13 +823,52 @@ fn paint_text_layer(
 ) {
     let c = layer.color;
     let color = egui::Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3]);
-    let galley = painter.layout_no_wrap(layer.text.clone(), text_font(layer, to_screen), color);
+    let galley = text_galley(painter, layer, to_screen, color);
     // `TextShape` turns about `pos`, and `Layer::centre` for a label is its
-    // origin too, so the two agree without a correction.
-    painter.add(
-        egui::epaint::TextShape::new(to_screen(layer.a), galley, color)
-            .with_angle(layer.angle),
+    // anchor too, so the two agree without a correction — but alignment moves
+    // the *line* off the anchor, so the shape has to start where the ink does.
+    let pos = to_screen(layer.a) - egui::vec2(galley.size().x * align_shift(layer.align), 0.0);
+    painter.add(egui::epaint::TextShape::new(pos, galley, color).with_angle(layer.angle));
+}
+
+/// How far left of its anchor a label starts, as a fraction of its width.
+/// Mirrors `annotate::Label::shift`.
+fn align_shift(align: TextAlign) -> f32 {
+    match align {
+        TextAlign::Left => 0.0,
+        TextAlign::Centre => 0.5,
+        TextAlign::Right => 1.0,
+    }
+}
+
+/// A label laid out the way it will be baked, underline included.
+///
+/// egui carries an underline in `TextFormat`, which `layout_no_wrap` does not
+/// take — hence the job. Worth the extra lines: the alternative is drawing the
+/// rule by hand here and again in `render::text`, which is exactly how the
+/// stand-in and the bake have drifted apart every other time.
+fn text_galley(
+    painter: &egui::Painter,
+    layer: &Layer,
+    to_screen: &dyn Fn([f32; 2]) -> egui::Pos2,
+    color: egui::Color32,
+) -> std::sync::Arc<egui::Galley> {
+    let mut job = egui::text::LayoutJob::default();
+    job.append(
+        &layer.text,
+        0.0,
+        egui::TextFormat {
+            font_id: text_font(layer, to_screen),
+            color,
+            underline: if layer.underline {
+                egui::Stroke::new((text_font(layer, to_screen).size * 0.06).max(1.0), color)
+            } else {
+                egui::Stroke::NONE
+            },
+            ..Default::default()
+        },
     );
+    painter.layout_job(job)
 }
 
 /// The on-screen font for a label, scaled the way the picture is.
@@ -934,9 +959,9 @@ fn selection_rect(
 ) -> egui::Rect {
     let a = to_screen(layer.a);
     if layer.kind == Tool::Text {
-        let font = text_font(layer, to_screen);
-        let galley = painter.layout_no_wrap(layer.text.clone(), font, egui::Color32::WHITE);
-        return egui::Rect::from_min_size(a, galley.size()).expand(5.0);
+        let galley = text_galley(painter, layer, to_screen, egui::Color32::WHITE);
+        let start = a - egui::vec2(galley.size().x * align_shift(layer.align), 0.0);
+        return egui::Rect::from_min_size(start, galley.size()).expand(5.0);
     }
     let unit = (to_screen([1.0, 0.0]).x - to_screen([0.0, 0.0]).x).abs();
     let half = (layer.stroke * unit).max(1.0) / 2.0;
@@ -966,41 +991,139 @@ fn stroke_shape(
             if len < 1.0 {
                 return;
             }
-            // The same three lengths `draw_arrow` uses, in the same units.
-            let head = (layer.stroke * 4.0).max(10.0).min(len);
+            // The same lengths `draw_arrow` uses, in the same units.
+            let reach = (layer.stroke * 4.0).max(10.0).min(len);
             let along = (b[1] - a[1]).atan2(b[0] - a[0]);
-            let barb = |sign: f32| {
+            let corner = |sign: f32| {
                 let t = along + std::f32::consts::PI + sign * 0.49;
-                [b[0] + head * t.cos(), b[1] + head * t.sin()]
+                [b[0] + reach * t.cos(), b[1] + reach * t.sin()]
             };
-            let (l, r) = (barb(-1.0), barb(1.0));
-            for [from, to] in [[a, b], [b, l], [b, r]] {
-                painter.line_segment([place(from), place(to)], stroke);
+            let (l, r) = (corner(-1.0), corner(1.0));
+            let neck = [(l[0] + r[0]) / 2.0, (l[1] + r[1]) / 2.0];
+
+            let shaft = match layer.head {
+                Head::Open => vec![(a, b)],
+                Head::Solid => vec![(a, neck)],
+                Head::Dashed => dashes(a, neck, layer.stroke * 2.0),
+            };
+            for (from, to) in &shaft {
+                painter.line_segment([place(*from), place(*to)], stroke);
+                // The exporter unions capsules, so every end is round.
+                // `line_segment` has butt caps, which is what made the arrow
+                // snap from soft to hard on mouse-up.
+                for p in [from, to] {
+                    painter.circle_filled(place(*p), stroke.width / 2.0, stroke.color);
+                }
             }
-            // The exporter unions three capsules, so every end and the joint at
-            // the tip is round. `line_segment` has butt caps and no joint, which
-            // is what made the arrow snap from soft to hard on mouse-up.
-            for p in [a, b, l, r] {
-                painter.circle_filled(place(p), stroke.width / 2.0, stroke.color);
+            match layer.head {
+                Head::Open => {
+                    for barb in [l, r] {
+                        painter.line_segment([place(b), place(barb)], stroke);
+                        painter.circle_filled(place(barb), stroke.width / 2.0, stroke.color);
+                    }
+                    painter.circle_filled(place(b), stroke.width / 2.0, stroke.color);
+                }
+                Head::Solid | Head::Dashed => {
+                    painter.add(egui::Shape::convex_polygon(
+                        vec![place(b), place(l), place(r)],
+                        stroke.color,
+                        stroke,
+                    ));
+                }
             }
         }
         Tool::Rect => {
-            let pts = corners(a, b).map(place).to_vec();
-            painter.add(egui::Shape::closed_line(pts, stroke));
+            let pts: Vec<egui::Pos2> = rounded_corners(a, b, layer.corner)
+                .into_iter()
+                .map(place)
+                .collect();
+            fill_or_outline(painter, layer, pts, stroke);
         }
         Tool::Ellipse => {
             let (cx, cy) = ((a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0);
             let (rx, ry) = ((b[0] - a[0]) / 2.0, (b[1] - a[1]) / 2.0);
-            let pts: Vec<egui::Pos2> = (0..=48)
+            let pts: Vec<egui::Pos2> = (0..48)
                 .map(|i| {
                     let t = i as f32 / 48.0 * std::f32::consts::TAU;
                     place([cx + rx * t.cos(), cy + ry * t.sin()])
                 })
                 .collect();
-            painter.add(egui::Shape::closed_line(pts, stroke));
+            fill_or_outline(painter, layer, pts, stroke);
         }
         _ => {}
     }
+}
+
+/// The outline of a rectangle whose corners are rounded by `r`, as a polygon.
+///
+/// The exporter's rounded box comes out of the distance field for free; here it
+/// has to be walked, and the arc has to be sampled finely enough that the
+/// stand-in and the bake do not visibly disagree at a large radius.
+fn rounded_corners(a: [f32; 2], b: [f32; 2], r: f32) -> Vec<[f32; 2]> {
+    let (x0, x1) = (a[0].min(b[0]), a[0].max(b[0]));
+    let (y0, y1) = (a[1].min(b[1]), a[1].max(b[1]));
+    let r = r.clamp(0.0, ((x1 - x0) / 2.0).min((y1 - y0) / 2.0));
+    if r < 0.5 {
+        return corners(a, b).to_vec();
+    }
+    const STEPS: usize = 8;
+    let quarter = std::f32::consts::FRAC_PI_2;
+    // Centre of each corner's arc, and the angle its sweep starts at, going
+    // clockwise from the top left.
+    let arcs = [
+        ([x0 + r, y0 + r], std::f32::consts::PI),
+        ([x1 - r, y0 + r], -quarter * 2.0 + quarter),
+        ([x1 - r, y1 - r], 0.0),
+        ([x0 + r, y1 - r], quarter),
+    ];
+    let mut out = Vec::with_capacity(arcs.len() * (STEPS + 1));
+    for (c, from) in arcs {
+        for i in 0..=STEPS {
+            let t = from + quarter * i as f32 / STEPS as f32;
+            out.push([c[0] + r * t.cos(), c[1] + r * t.sin()]);
+        }
+    }
+    out
+}
+
+/// Draw a closed shape the way the exporter will: as an area when the layer is
+/// filled, as a line when it is not.
+///
+/// A filled shape keeps its stroke — the renderer rasterises the interior and
+/// the same band outside it — so the polygon is drawn with both.
+fn fill_or_outline(
+    painter: &egui::Painter,
+    layer: &Layer,
+    pts: Vec<egui::Pos2>,
+    stroke: egui::Stroke,
+) {
+    if layer.filled {
+        painter.add(egui::Shape::convex_polygon(pts, stroke.color, stroke));
+    } else {
+        painter.add(egui::Shape::closed_line(pts, stroke));
+    }
+}
+
+/// A dashed line as a list of segments, mirroring `annotate::dashes`.
+fn dashes(a: [f32; 2], b: [f32; 2], gap: f32) -> Vec<([f32; 2], [f32; 2])> {
+    let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+    let len = (dx * dx + dy * dy).sqrt();
+    let gap = gap.max(1.0);
+    if len < gap * 2.0 {
+        return vec![(a, b)];
+    }
+    let (ux, uy) = (dx / len, dy / len);
+    let mut out = Vec::new();
+    let mut at = 0.0;
+    while at < len {
+        let to = (at + gap).min(len);
+        out.push((
+            [a[0] + ux * at, a[1] + uy * at],
+            [a[0] + ux * to, a[1] + uy * to],
+        ));
+        at = to + gap;
+    }
+    out
 }
 
 /// The four corners of a rectangle, in order.
@@ -1233,12 +1356,8 @@ fn hit_bounds(painter: &egui::Painter, layer: &Layer) -> [f32; 4] {
         .size();
     // A little slack so the very edge of a glyph is still grabbable.
     let pad = (layer.font_size * 0.3).max(4.0);
-    [
-        layer.a[0] - pad,
-        layer.a[1] - pad,
-        layer.a[0] + size.x + pad,
-        layer.a[1] + size.y + pad,
-    ]
+    let x0 = layer.a[0] - size.x * align_shift(layer.align);
+    [x0 - pad, layer.a[1] - pad, x0 + size.x + pad, layer.a[1] + size.y + pad]
 }
 
 /// Do two `[x0, y0, x1, y1]` boxes overlap at all?

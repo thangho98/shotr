@@ -81,6 +81,39 @@ pub fn draw(
     }
 }
 
+/// Draw a rule under a line whose top-left corner is at `(x, y)`.
+///
+/// Placed from the font's own ascent rather than from a fraction of the em, so
+/// it clears the descenders of the face actually in use instead of the one this
+/// was tuned against. `ab_glyph` does not read the `post` table, which is where
+/// a font states its own underline position, so the offset below is a
+/// convention rather than the designer's intent.
+pub fn underline(
+    img: &mut RgbaImage,
+    font: &FontArc,
+    em: f32,
+    x: f32,
+    y: f32,
+    w: f32,
+    color: Rgba<u8>,
+) {
+    let scaled = font.as_scaled(px_scale(font, em));
+    let thickness = (em * 0.06).max(1.0);
+    let top = y + scaled.ascent() + (em * 0.12).max(1.0);
+    for row in 0..thickness.ceil() as u32 {
+        let ty = top + row as f32;
+        if ty < 0.0 {
+            continue;
+        }
+        for col in 0..w.ceil() as u32 {
+            let tx = x + col as f32;
+            if tx >= 0.0 {
+                blend(img, tx as u32, ty as u32, color, 1.0);
+            }
+        }
+    }
+}
+
 /// The first system font we can find that covers Vietnamese diacritics.
 ///
 /// egui's bundled font does not, so the UI and the watermark share this lookup.

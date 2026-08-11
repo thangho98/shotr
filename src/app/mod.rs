@@ -5,6 +5,7 @@
 use crate::i18n::{t, tf};
 
 mod canvas;
+mod controls;
 pub(crate) mod icons;
 mod ocr_job;
 pub(crate) mod shell;
@@ -73,6 +74,9 @@ pub(crate) const SIDEBAR_W: f32 = 336.0;
 pub(crate) const STATUS_SECONDS: f64 = 6.0;
 pub(crate) const PREVIEW_MAX_W: u32 = 1000;
 pub(crate) const SWATCH_PX: u32 = 56;
+/// How far a duplicated shape lands from the one it was copied from, in
+/// preview points — enough to read as two shapes without leaving the picture.
+const DUPLICATE_OFFSET: f32 = 16.0;
 
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum Mode {
@@ -266,6 +270,13 @@ pub struct ShotrApp {
     /// so dialling paint down to a translucent marker does not also make every
     /// arrow and box drawn afterwards see-through.
     pub(crate) annot_paint_alpha: u8,
+    /// Whether the next shape is a filled area rather than an outline.
+    pub(crate) annot_filled: bool,
+    pub(crate) annot_corner: f32,
+    pub(crate) annot_head: crate::annotate::Head,
+    pub(crate) annot_cover: crate::annotate::Cover,
+    pub(crate) annot_underline: bool,
+    pub(crate) annot_align: crate::annotate::TextAlign,
     /// Where the screenshot sits inside the last preview render.
     pub(crate) preview_geom: Geometry,
 
@@ -409,11 +420,17 @@ impl ShotrApp {
             draft: None,
             move_delta: None,
             drag_anchor: None,
-            annot_color: [0xff, 0x3b, 0x30, 0xff],
+            annot_color: [0xff, 0x5a, 0x5a, 0xff],
             annot_stroke: 6.0,
             annot_font_size: 34.0,
             annot_blur: 12.0,
             annot_paint_alpha: 255,
+            annot_filled: false,
+            annot_corner: 0.0,
+            annot_head: crate::annotate::Head::Solid,
+            annot_cover: crate::annotate::Cover::Blur,
+            annot_underline: false,
+            annot_align: crate::annotate::TextAlign::Left,
             preview_geom: Geometry::default(),
             ocr_words: Vec::new(),
             ocr_findings: Vec::new(),
@@ -662,6 +679,73 @@ impl ShotrApp {
             self.selected_layer = None;
             self.dirty = true;
         }
+    }
+
+    /// A fresh layer carrying every dial the options row can set.
+    ///
+    /// One place, because a dial that the row can move but a *new* shape does
+    /// not pick up looks like the control being broken, and nothing stops
+    /// compiling when one is forgotten.
+    pub(crate) fn new_layer(&self, tool: Tool, at: [f32; 2]) -> Layer {
+        let mut layer = Layer::new(
+            tool,
+            at,
+            self.ink(tool),
+            self.annot_stroke,
+            self.annot_font_size,
+            self.annot_blur,
+        );
+        layer.filled = self.annot_filled;
+        layer.corner = self.annot_corner;
+        layer.head = self.annot_head;
+        layer.cover = self.annot_cover;
+        layer.underline = self.annot_underline;
+        layer.align = self.annot_align;
+        layer
+    }
+
+    /// Move the selected shape one place through the stack, `1` being towards
+    /// the viewer.
+    ///
+    /// The selection follows the shape rather than staying on the index. The
+    /// alternative is that "Bring forward" appears to select whatever was
+    /// standing there, which reads as the button picking a different shape.
+    pub(crate) fn reorder_selected_layer(&mut self, shift: isize) {
+        let Some(i) = self.selected_layer.filter(|i| *i < self.layers.len()) else {
+            return;
+        };
+        let Some(to) = i
+            .checked_add_signed(shift)
+            .filter(|to| *to < self.layers.len())
+        else {
+            return;
+        };
+        self.undo.push(&self.layers);
+        self.layers.swap(i, to);
+        self.selected_layer = Some(to);
+        self.dirty = true;
+    }
+
+    /// Copy the selected shape, offset far enough to be seen as a second one.
+    ///
+    /// The copy lands on top and takes the selection, so a second Duplicate
+    /// walks away from the original instead of piling copies on one spot. The
+    /// offset is in shot pixels, so it is the same distance on screen whatever
+    /// the preview is scaled to.
+    pub(crate) fn duplicate_selected_layer(&mut self) {
+        let Some(mut copy) = self
+            .selected_layer
+            .and_then(|i| self.layers.get(i))
+            .cloned()
+        else {
+            return;
+        };
+        self.undo.push(&self.layers);
+        let step = DUPLICATE_OFFSET / self.preview_scale.max(f32::EPSILON);
+        copy.translate(step, step);
+        self.layers.push(copy);
+        self.selected_layer = Some(self.layers.len() - 1);
+        self.dirty = true;
     }
 
     /// Commit a finished drag. Returns false if the shape was a stray click.

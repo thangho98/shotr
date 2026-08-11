@@ -224,6 +224,13 @@ fn line_stroke() -> Stroke {
     Stroke::new(1.0_f32, pal().line)
 }
 
+/// The heavier of the two rules, for a chip or a slider knob — anything whose
+/// edge has to read against the control it sits *on* rather than against the
+/// panel behind it.
+pub(crate) fn strong_line() -> Color32 {
+    hover_line_of(pal())
+}
+
 /// The outline a control gains under the pointer.
 ///
 /// On a dark surface it can brighten; on a light one there is nothing brighter

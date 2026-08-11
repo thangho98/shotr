@@ -88,6 +88,47 @@ pub struct Layer {
     /// information rather than decorate it, so there is nothing to gain by
     /// tilting them and [`Layer::turnable`] says so.
     pub angle: f32,
+    /// Whether a shape is a filled area rather than an outline.
+    pub filled: bool,
+    /// Corner radius, in original screenshot pixels. 0 is a sharp corner.
+    pub corner: f32,
+    pub head: Head,
+    pub cover: Cover,
+    pub underline: bool,
+    pub align: TextAlign,
+}
+
+/// What sits at the far end of an arrow.
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Debug, Default)]
+pub enum Head {
+    /// A filled triangle, wider than the shaft. The mark a marker pen makes.
+    #[default]
+    Solid,
+    /// Two barbs swept back from the tip, the width of the shaft.
+    Open,
+    /// A dashed shaft under a solid head, for a pointer that must not be
+    /// mistaken for something in the picture.
+    Dashed,
+}
+
+/// How a redaction hides what is under it.
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Debug, Default)]
+pub enum Cover {
+    #[default]
+    Blur,
+    /// Block averaging. Worth offering beside blur because a gaussian is a
+    /// convolution and can be partly undone by deconvolution, where averaging
+    /// throws the detail away outright.
+    Pixelate,
+}
+
+/// Which way a label grows from the point it was placed at.
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Debug, Default)]
+pub enum TextAlign {
+    #[default]
+    Left,
+    Centre,
+    Right,
 }
 
 impl Layer {
@@ -109,6 +150,12 @@ impl Layer {
             font_size,
             blur,
             angle: 0.0,
+            filled: false,
+            corner: 0.0,
+            head: Head::default(),
+            cover: Cover::default(),
+            underline: false,
+            align: TextAlign::default(),
         }
     }
 
@@ -195,17 +242,37 @@ pub fn apply(img: &mut RgbaImage, layers: &[Layer], scale: f32, font: Option<&Fo
             angle: layer.angle,
             centre: [c[0] * scale, c[1] * scale],
         };
+        let ink = Ink {
+            color: layer.color,
+            stroke,
+            turn,
+            filled: layer.filled,
+            corner: layer.corner * scale,
+        };
         match layer.kind {
-            Tool::Arrow => draw_arrow(img, a, b, stroke, layer.color, turn, scale),
-            Tool::Rect => draw_rect(img, a, b, stroke, layer.color, turn),
-            Tool::Ellipse => draw_ellipse(img, a, b, stroke, layer.color, turn),
+            Tool::Arrow => draw_arrow(img, a, b, &ink, layer.head, scale),
+            Tool::Rect => draw_rect(img, a, b, &ink),
+            Tool::Ellipse => draw_ellipse(img, a, b, &ink),
             Tool::Highlight => draw_paint(img, a, b, layer.color, turn),
             Tool::Fill => draw_fill(img, a, b, layer.color),
-            Tool::Blur => draw_blur(img, a, b, (layer.blur * scale).max(1.0)),
+            Tool::Blur => {
+                let amount = (layer.blur * scale).max(1.0);
+                match layer.cover {
+                    Cover::Blur => draw_blur(img, a, b, amount),
+                    Cover::Pixelate => draw_pixelate(img, a, b, amount),
+                }
+            }
             Tool::Text => {
                 if let Some(font) = font {
-                    let size = (layer.font_size * scale).max(6.0);
-                    draw_text(img, font, size, a, Rgba(layer.color), &layer.text, layer.angle);
+                    let label = Label {
+                        size: (layer.font_size * scale).max(6.0),
+                        at: a,
+                        color: Rgba(layer.color),
+                        angle: layer.angle,
+                        underline: layer.underline,
+                        align: layer.align,
+                    };
+                    draw_text(img, font, &label, &layer.text);
                 }
             }
             Tool::Select => {}
@@ -230,27 +297,62 @@ fn sd_segment(px: f32, py: f32, a: [f32; 2], b: [f32; 2]) -> f32 {
 }
 
 /// Distance to the *outline* of an axis-aligned box.
-fn sd_box_outline(px: f32, py: f32, cx: f32, cy: f32, hw: f32, hh: f32) -> f32 {
-    let qx = (px - cx).abs() - hw;
-    let qy = (py - cy).abs() - hh;
+/// Signed distance to a rectangle, rounded by `r`. Negative inside.
+///
+/// The rounding is free: shrink the box by `r` and subtract `r` from the
+/// distance, which is the same trick that gives the *sharp* box its rounded
+/// outer corners — `outside` is a Euclidean distance to the corner point, so
+/// the field around a corner is already circular.
+fn sd_round_box(px: f32, py: f32, cx: f32, cy: f32, hw: f32, hh: f32, r: f32) -> f32 {
+    let qx = (px - cx).abs() - (hw - r);
+    let qy = (py - cy).abs() - (hh - r);
     let outside = (qx.max(0.0).powi(2) + qy.max(0.0).powi(2)).sqrt();
     let inside = qx.max(qy).min(0.0);
-    (outside + inside).abs()
+    outside + inside - r
 }
 
-/// Approximate distance to an ellipse outline. Exact ellipse SDF needs an
+/// Approximate signed distance to an ellipse. Exact ellipse SDF needs an
 /// iterative solve; scaling the space to a circle is close enough at the stroke
 /// widths we draw and costs a fraction as much.
-fn sd_ellipse_outline(px: f32, py: f32, cx: f32, cy: f32, rx: f32, ry: f32) -> f32 {
+fn sd_ellipse(px: f32, py: f32, cx: f32, cy: f32, rx: f32, ry: f32) -> f32 {
     let (rx, ry) = (rx.max(0.5), ry.max(0.5));
     let nx = (px - cx) / rx;
     let ny = (py - cy) / ry;
     let len = (nx * nx + ny * ny).sqrt();
-    (len - 1.0).abs() * rx.min(ry)
+    (len - 1.0) * rx.min(ry)
 }
 
 /// Rasterise a shape over its bounding box, `sdf` returning distance to the
 /// figure and `cov` converting that to coverage.
+/// Everything a drawn shape needs beyond its two corners, already scaled into
+/// the pixels being drawn into.
+///
+/// Bundled because these travel together through every shape drawer, and
+/// passing them one by one put four of those functions over the argument limit
+/// as the options row grew.
+struct Ink {
+    color: Rgba8,
+    stroke: f32,
+    turn: Turn,
+    /// Whether the shape is an area rather than an outline. A filled shape
+    /// keeps its stroke: the fill is the interior *plus* the outline, which is
+    /// what the distance field gives for free by not taking the absolute value.
+    filled: bool,
+    corner: f32,
+}
+
+impl Ink {
+    /// The distance a filled shape is rasterised from, given the signed
+    /// distance to its edge.
+    ///
+    /// Outline: distance to the *boundary*, so the band is centred on it.
+    /// Filled: the signed distance itself, so everything inside is covered and
+    /// the same band still hangs outside.
+    fn shape_of(&self, signed: f32) -> f32 {
+        if self.filled { signed } else { signed.abs() }
+    }
+}
+
 /// How a shape is turned: by `angle`, about `centre` in the pixels being drawn
 /// into. The two always travel together, so they travel as one.
 #[derive(Clone, Copy)]
@@ -336,32 +438,28 @@ fn rasterise(
 
 // ------------------------------------------------------------------- drawing
 
-fn draw_arrow(
-    img: &mut RgbaImage,
-    a: [f32; 2],
-    b: [f32; 2],
-    stroke: f32,
-    color: Rgba8,
-    turn: Turn,
-    scale: f32,
-) {
+fn draw_arrow(img: &mut RgbaImage, a: [f32; 2], b: [f32; 2], ink: &Ink, head: Head, scale: f32) {
     let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
     let len = (dx * dx + dy * dy).sqrt();
     if len < 1.0 {
         return;
     }
+    let stroke = ink.stroke;
     // The floor is 10 *shot* pixels, so it has to be scaled with everything
     // else. A bare 10 here is 10 preview pixels in the preview and 10 export
     // pixels in the export, which gave the same arrow two different heads.
-    let head = (stroke * 4.0).max(10.0 * scale).min(len);
+    let reach = (stroke * 4.0).max(10.0 * scale).min(len);
     let along = dy.atan2(dx);
 
-    // Two barbs swept back from the tip at ±28°.
-    let barb = |sign: f32| -> [f32; 2] {
+    // Swept back from the tip at ±28°. The open head puts a barb here; the
+    // solid one puts a triangle's back corners here, so the two are the same
+    // width and swapping between them does not change how far the arrow
+    // reaches.
+    let corner = |sign: f32| -> [f32; 2] {
         let t = along + std::f32::consts::PI + sign * 0.49;
-        [b[0] + head * t.cos(), b[1] + head * t.sin()]
+        [b[0] + reach * t.cos(), b[1] + reach * t.sin()]
     };
-    let (l, r) = (barb(-1.0), barb(1.0));
+    let (l, r) = (corner(-1.0), corner(1.0));
 
     let pad = stroke * 2.0;
     let x0 = a[0].min(b[0]).min(l[0]).min(r[0]) - pad;
@@ -369,63 +467,109 @@ fn draw_arrow(
     let x1 = a[0].max(b[0]).max(l[0]).max(r[0]) + pad;
     let y1 = a[1].max(b[1]).max(l[1]).max(r[1]) + pad;
 
+    // A solid head is wider than the shaft, so the shaft stops short of the
+    // tip: run it to the middle of the head's back edge instead. Otherwise the
+    // shaft's round cap pokes out past the point.
+    let neck = [(l[0] + r[0]) / 2.0, (l[1] + r[1]) / 2.0];
+    let shaft: Vec<([f32; 2], [f32; 2])> = match head {
+        Head::Open => vec![(a, b)],
+        Head::Solid => vec![(a, neck)],
+        // Dashes twice their own length apart, so the gaps read as deliberate
+        // at any stroke width.
+        Head::Dashed => dashes(a, neck, stroke * 2.0),
+    };
+
     rasterise_turned(
         img,
         [x0, y0, x1, y1],
-        color,
-        turn,
+        ink.color,
+        ink.turn,
         |px, py| {
-            sd_segment(px, py, a, b)
-                .min(sd_segment(px, py, b, l))
-                .min(sd_segment(px, py, b, r))
+            let mut d = f32::MAX;
+            for (from, to) in &shaft {
+                d = d.min(sd_segment(px, py, *from, *to));
+            }
+            match head {
+                // The barbs are strokes like the shaft, so they join it with
+                // the same round cap and the whole arrow is one silhouette.
+                Head::Open => d
+                    .min(sd_segment(px, py, b, l))
+                    .min(sd_segment(px, py, b, r)),
+                // The triangle is an area, so its distance is already inside
+                // the band `rasterise` covers — no half-stroke to subtract.
+                Head::Solid | Head::Dashed => d.min(sd_triangle(px, py, b, l, r) + stroke / 2.0),
+            }
         },
         stroke / 2.0,
     );
 }
 
-fn draw_rect(
-    img: &mut RgbaImage,
-    a: [f32; 2],
-    b: [f32; 2],
-    stroke: f32,
-    color: Rgba8,
-    turn: Turn,
-) {
+/// A dashed line as a list of segments, `gap` long and `gap` apart.
+fn dashes(a: [f32; 2], b: [f32; 2], gap: f32) -> Vec<([f32; 2], [f32; 2])> {
+    let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+    let len = (dx * dx + dy * dy).sqrt();
+    let gap = gap.max(1.0);
+    if len < gap * 2.0 {
+        return vec![(a, b)];
+    }
+    let (ux, uy) = (dx / len, dy / len);
+    let mut out = Vec::new();
+    let mut at = 0.0;
+    while at < len {
+        let to = (at + gap).min(len);
+        out.push((
+            [a[0] + ux * at, a[1] + uy * at],
+            [a[0] + ux * to, a[1] + uy * to],
+        ));
+        at = to + gap;
+    }
+    out
+}
+
+/// Signed distance to a triangle. Negative inside.
+fn sd_triangle(px: f32, py: f32, p0: [f32; 2], p1: [f32; 2], p2: [f32; 2]) -> f32 {
+    let edge = |from: [f32; 2], to: [f32; 2]| sd_segment(px, py, from, to);
+    let d = edge(p0, p1).min(edge(p1, p2)).min(edge(p2, p0));
+    // Winding: the point is inside when it is on the same side of all three
+    // edges. Comparing signs of the cross products says which.
+    let side = |from: [f32; 2], to: [f32; 2]| {
+        (to[0] - from[0]) * (py - from[1]) - (to[1] - from[1]) * (px - from[0])
+    };
+    let (s0, s1, s2) = (side(p0, p1), side(p1, p2), side(p2, p0));
+    let inside = (s0 >= 0.0 && s1 >= 0.0 && s2 >= 0.0) || (s0 <= 0.0 && s1 <= 0.0 && s2 <= 0.0);
+    if inside { -d } else { d }
+}
+
+fn draw_rect(img: &mut RgbaImage, a: [f32; 2], b: [f32; 2], ink: &Ink) {
     let (x0, x1) = min_max(a[0], b[0]);
     let (y0, y1) = min_max(a[1], b[1]);
     let (cx, cy) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
     let (hw, hh) = ((x1 - x0) / 2.0, (y1 - y0) / 2.0);
-    let pad = stroke + 2.0;
+    let r = ink.corner.clamp(0.0, hw.min(hh));
+    let pad = ink.stroke + 2.0;
     rasterise_turned(
         img,
         [x0 - pad, y0 - pad, x1 + pad, y1 + pad],
-        color,
-        turn,
-        |px, py| sd_box_outline(px, py, cx, cy, hw, hh),
-        stroke / 2.0,
+        ink.color,
+        ink.turn,
+        |px, py| ink.shape_of(sd_round_box(px, py, cx, cy, hw, hh, r)),
+        ink.stroke / 2.0,
     );
 }
 
-fn draw_ellipse(
-    img: &mut RgbaImage,
-    a: [f32; 2],
-    b: [f32; 2],
-    stroke: f32,
-    color: Rgba8,
-    turn: Turn,
-) {
+fn draw_ellipse(img: &mut RgbaImage, a: [f32; 2], b: [f32; 2], ink: &Ink) {
     let (x0, x1) = min_max(a[0], b[0]);
     let (y0, y1) = min_max(a[1], b[1]);
     let (cx, cy) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
     let (rx, ry) = ((x1 - x0) / 2.0, (y1 - y0) / 2.0);
-    let pad = stroke + 2.0;
+    let pad = ink.stroke + 2.0;
     rasterise_turned(
         img,
         [x0 - pad, y0 - pad, x1 + pad, y1 + pad],
-        color,
-        turn,
-        |px, py| sd_ellipse_outline(px, py, cx, cy, rx, ry),
-        stroke / 2.0,
+        ink.color,
+        ink.turn,
+        |px, py| ink.shape_of(sd_ellipse(px, py, cx, cy, rx, ry)),
+        ink.stroke / 2.0,
     );
 }
 
@@ -525,26 +669,49 @@ fn draw_paint(
 /// shapes does not apply. Instead the text goes onto a transparent scratch
 /// image which is then turned whole — exactly what `render::watermark` already
 /// does for the wordmark, so the two share one rotation.
-fn draw_text(
-    img: &mut RgbaImage,
-    font: &FontArc,
+/// A line of text as the renderer needs it, already scaled.
+struct Label {
     size: f32,
+    /// The point the label was placed at. Which *part* of the line lands here
+    /// is what [`Label::align`] decides.
     at: [f32; 2],
     color: Rgba<u8>,
-    body: &str,
     angle: f32,
-) {
-    if angle.abs() < 1e-4 {
-        text::draw(img, font, size, at[0], at[1], color, body);
-        return;
+    underline: bool,
+    align: TextAlign,
+}
+
+impl Label {
+    /// How far left of the anchor the line starts, as a fraction of its width.
+    fn shift(&self) -> f32 {
+        match self.align {
+            TextAlign::Left => 0.0,
+            TextAlign::Centre => 0.5,
+            TextAlign::Right => 1.0,
+        }
     }
+}
+
+fn draw_text(img: &mut RgbaImage, font: &FontArc, label: &Label, body: &str) {
+    let size = label.size;
     let w = text::measure(font, size, body);
-    // `measure` answers width only; a line is about 1.35 em tall with its
-    // descenders, and the scratch image is padded generously anyway.
-    let h = size * 1.35;
     if w < 1.0 {
         return;
     }
+    let dx = w * label.shift();
+
+    if label.angle.abs() < 1e-4 {
+        let (x, y) = (label.at[0] - dx, label.at[1]);
+        text::draw(img, font, size, x, y, label.color, body);
+        if label.underline {
+            text::underline(img, font, size, x, y, w, label.color);
+        }
+        return;
+    }
+
+    // `measure` answers width only; a line is about 1.35 em tall with its
+    // descenders, and the scratch image is padded generously anyway.
+    let h = size * 1.35;
     // A margin, so the turned corners are not shaved off the scratch image.
     let pad = size;
     let mut stamp = RgbaImage::from_pixel(
@@ -552,23 +719,28 @@ fn draw_text(
         (h + pad * 2.0).ceil() as u32,
         Rgba([0, 0, 0, 0]),
     );
-    text::draw(&mut stamp, font, size, pad, pad, color, body);
-    let turned = crate::render::watermark::rotate(&stamp, angle);
+    text::draw(&mut stamp, font, size, pad, pad, label.color, body);
+    if label.underline {
+        text::underline(&mut stamp, font, size, pad, pad, w, label.color);
+    }
+    let turned = crate::render::watermark::rotate(&stamp, label.angle);
 
-    // The label turns about its own origin, but `rotate` turns the scratch
-    // image about the *image's* centre. So follow where the origin ended up and
-    // shift the result until it lands back where the label belongs.
+    // The label turns about its anchor, but `rotate` turns the scratch image
+    // about the *image's* centre. So follow where the anchor ended up and shift
+    // the result until it lands back where the label belongs.
     //
     // Getting this wrong is not subtle but it is silent: the glyphs tilt
     // correctly and simply sit somewhere else, which shows up as the selection
     // frame no longer agreeing with the text it is drawn around.
-    let (sin, cos) = angle.sin_cos();
+    let (sin, cos) = label.angle.sin_cos();
     let (sw, sh) = (stamp.width() as f32, stamp.height() as f32);
     let (tw, th) = (turned.width() as f32, turned.height() as f32);
-    // The origin, as an offset from the scratch image's centre.
-    let (vx, vy) = (pad - sw / 2.0, pad - sh / 2.0);
-    let ox = at[0] - (tw / 2.0 + vx * cos - vy * sin);
-    let oy = at[1] - (th / 2.0 + vx * sin + vy * cos);
+    // The anchor, as an offset from the scratch image's centre. Alignment moves
+    // it along the line rather than moving the line, so a turned label still
+    // pivots about the point it was placed at.
+    let (vx, vy) = (pad + dx - sw / 2.0, pad - sh / 2.0);
+    let ox = label.at[0] - (tw / 2.0 + vx * cos - vy * sin);
+    let oy = label.at[1] - (th / 2.0 + vx * sin + vy * cos);
     image::imageops::overlay(img, &turned, ox.round() as i64, oy.round() as i64);
 }
 
@@ -595,6 +767,48 @@ fn draw_blur(img: &mut RgbaImage, a: [f32; 2], b: [f32; 2], sigma: f32) {
     let region = image::imageops::crop_imm(img, x0, y0, x1 - x0, y1 - y0).to_image();
     let blurred = image::imageops::blur(&region, sigma);
     image::imageops::replace(img, &blurred, x0 as i64, y0 as i64);
+}
+
+/// Block averaging, the other way of hiding a region.
+///
+/// Worth having beside blur rather than instead of it: a gaussian is a
+/// convolution and can be partly undone by deconvolution or by upscaling,
+/// where averaging discards the detail outright. The two share the Amount
+/// dial, which reads as a radius for one and a block size for the other — at
+/// the same number they hide about as much as each other.
+fn draw_pixelate(img: &mut RgbaImage, a: [f32; 2], b: [f32; 2], block: f32) {
+    let Some((x0, y0, x1, y1)) = clamp_region(img, a, b) else {
+        return;
+    };
+    let block = (block.round() as u32).max(2);
+    let mut by = y0;
+    while by < y1 {
+        let ey = (by + block).min(y1);
+        let mut bx = x0;
+        while bx < x1 {
+            let ex = (bx + block).min(x1);
+            let mut sum = [0u64; 4];
+            let mut n = 0u64;
+            for y in by..ey {
+                for x in bx..ex {
+                    for (s, c) in sum.iter_mut().zip(img.get_pixel(x, y).0) {
+                        *s += c as u64;
+                    }
+                    n += 1;
+                }
+            }
+            if n > 0 {
+                let mean = sum.map(|s| (s / n) as u8);
+                for y in by..ey {
+                    for x in bx..ex {
+                        img.put_pixel(x, y, Rgba(mean));
+                    }
+                }
+            }
+            bx = ex;
+        }
+        by = ey;
+    }
 }
 
 /// Integer pixel region covered by the drag, clipped to the image.
@@ -834,6 +1048,190 @@ mod tests {
         );
     }
 
+    /// A filled shape covers its middle; an outline leaves it alone. The two
+    /// come from one distance field and differ only by an absolute value, so
+    /// this is the assertion that says the sign is being used.
+    #[test]
+    fn filling_a_shape_covers_its_middle_and_an_outline_does_not() {
+        for kind in [Tool::Rect, Tool::Ellipse] {
+            let middle = |filled: bool| {
+                let mut img = RgbaImage::from_pixel(100, 100, Rgba([0, 0, 0, 255]));
+                let mut l = layer(kind, [20.0, 20.0], [80.0, 80.0]);
+                l.filled = filled;
+                apply(&mut img, &[l], 1.0, None);
+                img.get_pixel(50, 50).0
+            };
+            assert_eq!(
+                middle(false),
+                [0, 0, 0, 255],
+                "{kind:?} painted its middle without being asked to fill"
+            );
+            assert_ne!(
+                middle(true),
+                [0, 0, 0, 255],
+                "{kind:?} was filled and its middle stayed empty"
+            );
+        }
+    }
+
+    /// A corner radius has to cut the corner off. Sampling the very corner of
+    /// the bounding box says whether it did.
+    #[test]
+    fn a_corner_radius_clears_the_corner_of_the_box() {
+        let corner_ink = |r: f32| {
+            let mut img = RgbaImage::from_pixel(100, 100, Rgba([0, 0, 0, 255]));
+            let mut l = layer(Tool::Rect, [20.0, 20.0], [80.0, 80.0]);
+            l.stroke = 3.0;
+            l.corner = r;
+            apply(&mut img, &[l], 1.0, None);
+            img.get_pixel(21, 21).0 != [0, 0, 0, 255]
+        };
+        assert!(corner_ink(0.0), "a sharp rectangle missed its own corner");
+        assert!(
+            !corner_ink(20.0),
+            "a 20px radius still painted the square corner"
+        );
+    }
+
+    /// The head is filled by giving the triangle a *signed* field, so this is
+    /// the assertion that says the sign is right. A field that came back
+    /// positive inside would draw the head as an outline.
+    #[test]
+    fn the_arrowheads_triangle_is_negative_inside_and_positive_outside() {
+        let (p0, p1, p2) = ([10.0, 0.0], [0.0, -5.0], [0.0, 5.0]);
+        assert!(
+            sd_triangle(3.0, 0.0, p0, p1, p2) < 0.0,
+            "a point inside the head reads as outside it, so the head is hollow"
+        );
+        assert!(sd_triangle(-3.0, 0.0, p0, p1, p2) > 0.0);
+        assert!(sd_triangle(0.0, 0.0, p0, p1, p2).abs() < 1e-4, "on the edge");
+    }
+
+    /// Three heads have to be three different marks. A style that silently drew
+    /// the same arrow would look like the buttons doing nothing.
+    #[test]
+    fn each_arrow_head_draws_something_different() {
+        let render = |head: Head| {
+            let mut img = RgbaImage::from_pixel(140, 60, Rgba([0, 0, 0, 0]));
+            let mut l = layer(Tool::Arrow, [10.0, 30.0], [130.0, 30.0]);
+            l.stroke = 4.0;
+            l.head = head;
+            apply(&mut img, &[l], 1.0, None);
+            img
+        };
+        let lit = |img: &RgbaImage| ink(img);
+        let (solid, open, dashed) = (
+            render(Head::Solid),
+            render(Head::Open),
+            render(Head::Dashed),
+        );
+        assert!(!lit(&solid).is_empty(), "the solid head drew nothing");
+        assert_ne!(lit(&solid), lit(&open), "solid and open are the same mark");
+        assert_ne!(lit(&dashed), lit(&solid), "dashed and solid are the same mark");
+
+        // A dashed shaft is gaps: walking the axis has to leave and re-enter
+        // the ink at least twice.
+        let runs = |img: &RgbaImage| {
+            let mut runs = 0;
+            let mut inside = false;
+            for x in 10..100 {
+                let on = img.get_pixel(x, 30).0[3] > 40;
+                if on && !inside {
+                    runs += 1;
+                }
+                inside = on;
+            }
+            runs
+        };
+        assert_eq!(runs(&solid), 1, "the solid arrow's shaft has a hole in it");
+        assert!(
+            runs(&dashed) >= 3,
+            "the dashed shaft came out as {} unbroken run(s)",
+            runs(&dashed)
+        );
+    }
+
+    /// Pixelate must actually flatten detail, not merely tint it: the point of
+    /// offering it beside blur is that what it removes cannot be recovered.
+    #[test]
+    fn pixelate_replaces_a_region_with_flat_blocks() {
+        let mut img = RgbaImage::from_pixel(40, 40, Rgba([0, 0, 0, 255]));
+        for y in 0..40 {
+            for x in 0..40 {
+                // A fine checkerboard: nothing survives averaging.
+                let v = if (x + y) % 2 == 0 { 255 } else { 0 };
+                img.put_pixel(x, y, Rgba([v, v, v, 255]));
+            }
+        }
+        let mut l = layer(Tool::Blur, [8.0, 8.0], [32.0, 32.0]);
+        l.cover = Cover::Pixelate;
+        l.blur = 8.0;
+        apply(&mut img, &[l], 1.0, None);
+
+        let a = img.get_pixel(12, 12).0;
+        let b = img.get_pixel(13, 13).0;
+        assert_eq!(a, b, "neighbouring pixels inside one block still differ");
+        assert!(
+            a[0] > 100 && a[0] < 160,
+            "the block is {a:?}, not the average of a checkerboard"
+        );
+        assert_eq!(
+            img.get_pixel(2, 2).0,
+            [255, 255, 255, 255],
+            "pixelate reached outside the region it was given"
+        );
+    }
+
+    /// Alignment moves the line, not the anchor: a right-aligned label ends
+    /// where a left-aligned one begins.
+    #[test]
+    fn alignment_moves_the_line_around_its_anchor() {
+        let Some((_, font)) = crate::render::text::load_system_font() else {
+            return;
+        };
+        let spread = |align: TextAlign| {
+            let mut img = RgbaImage::from_pixel(300, 80, Rgba([0, 0, 0, 0]));
+            let mut l = Layer::new(Tool::Text, [150.0, 20.0], [255, 0, 0, 255], 2.0, 24.0, 8.0);
+            l.text = "anchored".to_owned();
+            l.align = align;
+            apply(&mut img, &[l], 1.0, Some(&font));
+            let lit = ink(&img);
+            (
+                lit.iter().map(|p| p.0).min().unwrap_or(0),
+                lit.iter().map(|p| p.0).max().unwrap_or(0),
+            )
+        };
+        let (left0, _) = spread(TextAlign::Left);
+        let (_, right1) = spread(TextAlign::Right);
+        let (c0, c1) = spread(TextAlign::Centre);
+        assert!(left0 >= 148, "a left-aligned label starts left of its anchor");
+        assert!(right1 <= 152, "a right-aligned label ends right of its anchor");
+        assert!(
+            c0 < 150 && c1 > 150,
+            "a centred label sits {c0}..{c1}, not astride its anchor at 150"
+        );
+    }
+
+    /// The rule has to land under the glyphs, not through them.
+    #[test]
+    fn an_underline_adds_ink_below_the_text() {
+        let Some((_, font)) = crate::render::text::load_system_font() else {
+            return;
+        };
+        let lowest = |underline: bool| {
+            let mut img = RgbaImage::from_pixel(200, 80, Rgba([0, 0, 0, 0]));
+            let mut l = Layer::new(Tool::Text, [10.0, 10.0], [255, 0, 0, 255], 2.0, 24.0, 8.0);
+            l.text = "ruled".to_owned();
+            l.underline = underline;
+            apply(&mut img, &[l], 1.0, Some(&font));
+            ink(&img).iter().map(|p| p.1).max().unwrap_or(0)
+        };
+        assert!(
+            lowest(true) > lowest(false),
+            "the underline drew no lower than the text itself"
+        );
+    }
+
     /// Blur and Fill hide information rather than decorate it, so they stay
     /// square however the angle is set — there is nothing to gain from a
     /// tilted redaction box, and a great deal of code to go wrong.
@@ -892,19 +1290,41 @@ mod tests {
         assert!((d - 5.0).abs() < 1e-5);
     }
 
+    /// The field is *signed* now, because a filled shape is rasterised from the
+    /// same function without taking the absolute value. A field that came back
+    /// positive on both sides would fill the whole bounding box.
     #[test]
-    fn box_outline_distance_is_zero_on_the_edge() {
+    fn box_distance_is_zero_on_the_edge_and_negative_inside() {
         // 20x20 box centred at (50,50): the edge sits at x=40.
-        assert!(sd_box_outline(40.0, 50.0, 50.0, 50.0, 10.0, 10.0).abs() < 1e-5);
-        // Equidistant inside and outside — it is an outline, not a fill.
-        assert!((sd_box_outline(45.0, 50.0, 50.0, 50.0, 10.0, 10.0) - 5.0).abs() < 1e-5);
-        assert!((sd_box_outline(35.0, 50.0, 50.0, 50.0, 10.0, 10.0) - 5.0).abs() < 1e-5);
+        assert!(sd_round_box(40.0, 50.0, 50.0, 50.0, 10.0, 10.0, 0.0).abs() < 1e-5);
+        assert!((sd_round_box(35.0, 50.0, 50.0, 50.0, 10.0, 10.0, 0.0) - 5.0).abs() < 1e-5);
+        assert!(
+            (sd_round_box(45.0, 50.0, 50.0, 50.0, 10.0, 10.0, 0.0) + 5.0).abs() < 1e-5,
+            "inside the box the distance is not negative, so a fill would cover \
+             the whole bounding box"
+        );
+    }
+
+    /// Rounding pulls the corner in, and only the corner: a point on the middle
+    /// of an edge is exactly as far away as it was with sharp corners.
+    #[test]
+    fn a_rounded_corner_moves_the_corner_and_leaves_the_edges_alone() {
+        let sharp = sd_round_box(60.0, 60.0, 50.0, 50.0, 10.0, 10.0, 0.0);
+        let round = sd_round_box(60.0, 60.0, 50.0, 50.0, 10.0, 10.0, 5.0);
+        assert!(
+            round > sharp + 1.0,
+            "the corner point is {round} from a rounded box and {sharp} from a \
+             sharp one — the radius did nothing"
+        );
+        let edge = |r| sd_round_box(60.0, 50.0, 50.0, 50.0, 10.0, 10.0, r);
+        assert!((edge(0.0) - edge(5.0)).abs() < 1e-5, "the edge moved");
     }
 
     #[test]
-    fn ellipse_outline_distance_is_zero_on_the_axes() {
-        assert!(sd_ellipse_outline(60.0, 50.0, 50.0, 50.0, 10.0, 20.0).abs() < 1e-5);
-        assert!(sd_ellipse_outline(50.0, 70.0, 50.0, 50.0, 10.0, 20.0).abs() < 1e-5);
+    fn ellipse_distance_is_zero_on_the_axes_and_negative_inside() {
+        assert!(sd_ellipse(60.0, 50.0, 50.0, 50.0, 10.0, 20.0).abs() < 1e-5);
+        assert!(sd_ellipse(50.0, 70.0, 50.0, 50.0, 10.0, 20.0).abs() < 1e-5);
+        assert!(sd_ellipse(50.0, 50.0, 50.0, 50.0, 10.0, 20.0) < 0.0);
     }
 
     #[test]

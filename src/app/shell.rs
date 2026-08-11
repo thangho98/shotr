@@ -17,8 +17,8 @@ use eframe::egui;
 
 use super::icons::Glyph;
 use super::theme;
-use super::{Mode, SIDEBAR_W, ShotrApp, Zoom};
-use crate::annotate::Tool;
+use super::{Mode, SIDEBAR_W, ShotrApp, Zoom, controls};
+use crate::annotate::{Cover, Head, TextAlign, Tool};
 use crate::export;
 use crate::i18n::{t, tf};
 
@@ -42,10 +42,42 @@ pub(super) const TOOLS: [(Tool, char); 7] = [
     (Tool::Select, '`'),
 ];
 
-/// Width of the option controls in the pill, from the design.
-const OPT_COLOR_W: f32 = 28.0;
-const OPT_SLIDER_W: f32 = 92.0;
 const SEP_W: f32 = 1.0;
+/// The options row, and the space around it inside the capsule.
+const OPT_ROW_H: f32 = 38.0;
+const OPT_PAD_TOP: f32 = 5.0;
+const OPT_PAD_X: f32 = 6.0;
+/// Between the tool row and the hairline under it.
+const HAIRLINE_GAP: f32 = 5.0;
+
+/// The arrow heads, in the order the row offers them.
+const HEADS: [(Head, &str); 3] = [
+    (Head::Solid, "Solid head"),
+    (Head::Open, "Open head"),
+    (Head::Dashed, "Dashed"),
+];
+
+/// The two ways of hiding what is under a redaction.
+const COVERS: [(Cover, &str); 2] = [(Cover::Blur, "Blur"), (Cover::Pixelate, "Pixelate")];
+
+/// Moving a shape through the stack. `1` is towards the viewer.
+const ORDERING: [(isize, &str); 2] = [(1, "Bring forward"), (-1, "Send back")];
+
+/// Every dial the options row can move. Compared as a whole, so a new control
+/// cannot be added without the "apply to the selected shape" rule seeing it.
+type Dials = (
+    crate::settings::Rgba8,
+    f32,
+    f32,
+    f32,
+    u8,
+    bool,
+    f32,
+    Head,
+    Cover,
+    bool,
+    TextAlign,
+);
 /// Clearance the pill needs above the picture, so a shot fitted to the canvas
 /// never slides under it.
 const PILL_CLEARANCE: f32 = 86.0;
@@ -577,30 +609,55 @@ impl ShotrApp {
     /// width that disagreed with the contents would show as everything sitting
     /// slightly off to one side.
     fn tool_pill(&mut self, ui: &mut egui::Ui, canvas: egui::Rect) {
-        let drawing = self.tool != Tool::Select;
-        // Select's "option" is the one thing you can do to a chosen shape.
-        // Nothing else in the window says a shape is selected, or that
-        // deleting one is possible at all.
-        let can_delete = !drawing && self.selected_layer.is_some();
+        // The row shows for every drawing tool. Select has one only when a
+        // shape is chosen — with nothing selected there is nothing to reorder,
+        // duplicate or delete, and a row of dead buttons is worse than none.
+        let open = self.tool != Tool::Select || self.selected_layer.is_some();
 
-        // Hidden on the *widest* form, not the current one: a bar that appeared
-        // and vanished as the tool changed would be worse than a cramped one.
-        if pill_width(true, false) > canvas.width() - 16.0 {
+        let width = capsule_width(ui, open, self.tool);
+        if width > canvas.width() - 16.0 {
             return;
         }
-        let rect = pill_rect(canvas, drawing, can_delete);
+
+        // Two curves, deliberately offset: the height leads and the contents
+        // follow a beat behind, so the eye tracks the capsule's edge rather
+        // than the controls sliding in.
+        let grow = ease(anim(ui.ctx(), "pill_grow", open, 0.20));
+        let fade = anim(ui.ctx(), "pill_fade", open, 0.16);
+
+        let rect = pill_rect(canvas, width, grow);
         theme::glass(ui.painter(), rect);
 
+        let row = egui::Rect::from_min_size(
+            egui::pos2(
+                rect.center().x - tool_row_width() / 2.0,
+                rect.min.y + theme::PILL_PAD,
+            ),
+            egui::vec2(tool_row_width(), super::icons::BUTTON),
+        );
+        self.tool_row(ui, row);
+
+        if grow > 0.001 {
+            let hair = row.bottom() + HAIRLINE_GAP;
+            ui.painter().hline(
+                rect.min.x..=rect.max.x,
+                hair,
+                egui::Stroke::new(1.0_f32, theme::pal().line),
+            );
+            self.options_panel(ui, rect, hair, grow, fade);
+        }
+    }
+
+    /// The seven tool buttons. Fixed width, and centred in the capsule, so
+    /// nothing in the options row below can move them.
+    fn tool_row(&mut self, ui: &mut egui::Ui, rect: egui::Rect) {
         let mut ui = ui.new_child(
             egui::UiBuilder::new()
-                .id_salt("pill")
-                .max_rect(rect.shrink(theme::PILL_PAD))
+                .id_salt("tool_row")
+                .max_rect(rect)
                 .layout(egui::Layout::left_to_right(egui::Align::Center)),
         );
         ui.spacing_mut().item_spacing = egui::vec2(theme::PILL_GAP, 0.0);
-        ui.spacing_mut().interact_size = egui::vec2(OPT_COLOR_W, 26.0);
-        ui.spacing_mut().slider_width = OPT_SLIDER_W;
-
         for (tool, key) in TOOLS {
             if tool == Tool::Select {
                 separator(&mut ui);
@@ -610,86 +667,220 @@ impl ShotrApp {
                 self.tool = tool;
             }
         }
-        if drawing {
-            separator(&mut ui);
-            self.tool_options(&mut ui);
-        } else if can_delete {
-            separator(&mut ui);
-            if super::icons::glyph_button(&mut ui, Glyph::Trash, true, egui::vec2(OPT_COLOR_W, 26.0))
+    }
+
+    /// The options row, inside a container that is clipped as it opens.
+    ///
+    /// The clip is what makes the row appear to slide out from under the
+    /// hairline instead of fading in on top of the picture.
+    fn options_panel(
+        &mut self,
+        ui: &mut egui::Ui,
+        capsule: egui::Rect,
+        hairline_y: f32,
+        grow: f32,
+        fade: f32,
+    ) {
+        let full = OPT_PAD_TOP + OPT_ROW_H;
+        let container = egui::Rect::from_min_size(
+            egui::pos2(capsule.min.x, hairline_y + 1.0),
+            egui::vec2(capsule.width(), full * grow),
+        );
+        // Centred on the capsule's own centre. The padding is *around* the row,
+        // not part of it — adding it to the width and then starting the widgets
+        // at the left edge put the whole row half the padding off centre, which
+        // read as the capsule having uneven margins.
+        let width = self.row_width(ui);
+        let inner = egui::Rect::from_min_size(
+            egui::pos2(
+                capsule.center().x - width / 2.0,
+                // Travels the last 6px into place, which is the same offset the
+                // design gives the row's transform.
+                hairline_y + 1.0 + OPT_PAD_TOP - 6.0 * (1.0 - grow),
+            ),
+            egui::vec2(width, OPT_ROW_H),
+        );
+
+        let mut ui = ui.new_child(
+            egui::UiBuilder::new()
+                .id_salt("tool_options")
+                .max_rect(inner)
+                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+        );
+        ui.set_clip_rect(container);
+        ui.set_opacity(fade);
+        ui.spacing_mut().item_spacing = egui::vec2(controls::GAP, 0.0);
+        self.tool_options(&mut ui);
+
+        // The capsule's backdrop is painted before its contents, so the two
+        // widths have to agree. They come from different code — `row_items`
+        // measures and `tool_options` draws — because egui cannot build a row
+        // from data when every control needs a different `&mut`. This is what
+        // makes the drift loud: a control added to one and not the other shows
+        // up on the first run rather than as a row overflowing its own glass.
+        debug_assert!(
+            (ui.min_rect().width() - width).abs() < 1.0,
+            "the {:?} options row lays out {}pt wide against {width}pt measured — \
+             row_items and tool_options have drifted apart",
+            self.tool,
+            ui.min_rect().width(),
+        );
+    }
+
+    /// The controls belonging to the tool in hand.
+    fn tool_options(&mut self, ui: &mut egui::Ui) {
+        let before = self.annotation_dials();
+
+        match self.tool {
+            Tool::Arrow => {
+                self.swatches(ui);
+                controls::divider(ui);
+                controls::slider(ui, t("Stroke"), &mut self.annot_stroke, 1.0..=40.0, "");
+                controls::divider(ui);
+                for (head, name) in HEADS {
+                    if controls::pill(ui, t(name), self.annot_head == head).clicked() {
+                        self.annot_head = head;
+                    }
+                }
+            }
+            Tool::Text => {
+                self.swatches(ui);
+                controls::divider(ui);
+                controls::caption(ui, t("Size"));
+                controls::stepper(ui, &mut self.annot_font_size, 10.0..=160.0, 2.0);
+                controls::divider(ui);
+                if controls::square(ui, "U", self.annot_underline).clicked() {
+                    self.annot_underline = !self.annot_underline;
+                }
+                controls::divider(ui);
+                for align in [TextAlign::Left, TextAlign::Centre, TextAlign::Right] {
+                    if controls::align_toggle(ui, align, self.annot_align == align).clicked() {
+                        self.annot_align = align;
+                    }
+                }
+            }
+            Tool::Rect | Tool::Ellipse => {
+                self.swatches(ui);
+                controls::divider(ui);
+                controls::slider(ui, t("Stroke"), &mut self.annot_stroke, 1.0..=40.0, "");
+                controls::divider(ui);
+                controls::caption(ui, t("Fill"));
+                let ink = self.ink(self.tool);
+                let filled = egui::Color32::from_rgba_unmultiplied(ink[0], ink[1], ink[2], ink[3]);
+                if controls::fill_chip(ui, self.annot_filled, filled).clicked() {
+                    self.annot_filled = !self.annot_filled;
+                }
+                if self.tool == Tool::Rect {
+                    controls::caption(ui, t("Corner"));
+                    controls::stepper(ui, &mut self.annot_corner, 0.0..=120.0, 4.0);
+                }
+            }
+            Tool::Blur => {
+                for (cover, name) in COVERS {
+                    if controls::pill(ui, t(name), self.annot_cover == cover).clicked() {
+                        self.annot_cover = cover;
+                    }
+                }
+                controls::divider(ui);
+                controls::slider(ui, t("Amount"), &mut self.annot_blur, 2.0..=60.0, "");
+                controls::divider(ui);
+                controls::caption(ui, t("Pixelate survives a re-encode."));
+            }
+            Tool::Highlight => {
+                self.swatches(ui);
+                controls::divider(ui);
+                let mut pct = self.annot_paint_alpha as f32 / 255.0 * 100.0;
+                if controls::slider(ui, t("Opacity"), &mut pct, 5.0..=100.0, "%").changed() {
+                    self.annot_paint_alpha = (pct / 100.0 * 255.0).round() as u8;
+                }
+            }
+            Tool::Select | Tool::Fill => {
+                for (shift, name) in ORDERING {
+                    if controls::pill(ui, t(name), false).clicked() {
+                        self.reorder_selected_layer(shift);
+                    }
+                }
+                if controls::pill(ui, t("Duplicate"), false).clicked() {
+                    self.duplicate_selected_layer();
+                }
+                controls::divider(ui);
+                if super::icons::glyph_button(
+                    ui,
+                    Glyph::Trash,
+                    true,
+                    egui::vec2(controls::SQUARE, controls::H),
+                )
                 .on_hover_text(t("Delete the selected shape  ⌫"))
                 .clicked()
-            {
-                self.delete_selected_layer();
+                {
+                    self.delete_selected_layer();
+                }
+            }
+        }
+
+        // Changing a dial has to change the shape you just drew, not only the
+        // next one — otherwise the controls look broken.
+        if self.annotation_dials() != before {
+            self.apply_dials_to_selection();
+        }
+    }
+
+    /// The five inks, as the palette drawn into the picture.
+    fn swatches(&mut self, ui: &mut egui::Ui) {
+        for ink in controls::INK {
+            let chosen = self.annot_color == ink.to_array();
+            if controls::swatch(ui, ink, chosen).clicked() {
+                self.annot_color = ink.to_array();
             }
         }
     }
 
-    /// The one colour and the one slider that belong to the selected tool.
-    fn tool_options(&mut self, ui: &mut egui::Ui) {
-        let before = (
+    /// Every dial the options row can move, as one value to compare against.
+    fn annotation_dials(&self) -> Dials {
+        (
             self.annot_color,
             self.annot_stroke,
             self.annot_font_size,
             self.annot_blur,
             self.annot_paint_alpha,
-        );
+            self.annot_filled,
+            self.annot_corner,
+            self.annot_head,
+            self.annot_cover,
+            self.annot_underline,
+            self.annot_align,
+        )
+    }
 
-        super::sidebar::color_button(ui, &mut self.annot_color, 24.0).on_hover_text(t("Colour"));
-        // The slider shows no number — there is no room for one in the pill —
-        // so the tooltip has to, or the only way to read the current value is
-        // to change it and watch the picture.
-        match self.tool {
-            Tool::Text => {
-                ui.add(egui::Slider::new(&mut self.annot_font_size, 10.0..=160.0).show_value(false))
-                    .on_hover_text(dialled(t("Font size"), self.annot_font_size));
-            }
-            Tool::Blur => {
-                ui.add(egui::Slider::new(&mut self.annot_blur, 2.0..=60.0).show_value(false))
-                    .on_hover_text(dialled(t("Blur amount"), self.annot_blur));
-            }
-            Tool::Highlight => {
-                let mut pct = (self.annot_paint_alpha as f32 / 255.0 * 100.0).round() as u8;
-                let hover = format!(
-                    "{}\n{}",
-                    dialled(t("Paint opacity"), pct as f32),
-                    t("100% covers completely; lower is translucent, like a highlighter.")
-                );
-                if ui
-                    .add(egui::Slider::new(&mut pct, 5..=100).show_value(false))
-                    .on_hover_text(hover)
-                    .changed()
-                {
-                    self.annot_paint_alpha = (pct as f32 / 100.0 * 255.0).round() as u8;
-                }
-            }
-            _ => {
-                ui.add(egui::Slider::new(&mut self.annot_stroke, 1.0..=40.0).show_value(false))
-                    .on_hover_text(dialled(t("Stroke"), self.annot_stroke));
-            }
-        }
+    fn apply_dials_to_selection(&mut self) {
+        let Some(i) = self.selected_layer else { return };
+        let Some(kind) = self.layers.get(i).map(|l| l.kind) else {
+            return;
+        };
+        let ink = self.ink(kind);
+        let Some(layer) = self.layers.get_mut(i) else {
+            return;
+        };
+        layer.color = ink;
+        layer.stroke = self.annot_stroke;
+        layer.font_size = self.annot_font_size;
+        layer.blur = self.annot_blur;
+        layer.filled = self.annot_filled;
+        layer.corner = self.annot_corner;
+        layer.head = self.annot_head;
+        layer.cover = self.annot_cover;
+        layer.underline = self.annot_underline;
+        layer.align = self.annot_align;
+        self.dirty = true;
+    }
 
-        // Dragging a slider after drawing has to change the shape you just
-        // drew, not only the next one — otherwise the controls look broken.
-        let after = (
-            self.annot_color,
-            self.annot_stroke,
-            self.annot_font_size,
-            self.annot_blur,
-            self.annot_paint_alpha,
-        );
-        if after != before
-            && let Some(i) = self.selected_layer
-            && let Some(kind) = self.layers.get(i).map(|l| l.kind)
-        {
-            let ink = self.ink(kind);
-            if let Some(layer) = self.layers.get_mut(i) {
-                layer.color = ink;
-                layer.stroke = self.annot_stroke;
-                layer.font_size = self.annot_font_size;
-                layer.blur = self.annot_blur;
-                self.dirty = true;
-            }
-        }
+    /// How wide the current tool's options row will be.
+    ///
+    /// The capsule's backdrop is painted before its contents, so this and the
+    /// drawing above have to agree; a test lays out every row for real and
+    /// fails if they drift.
+    fn row_width(&self, ui: &egui::Ui) -> f32 {
+        row_width(ui, self.tool)
     }
 
     // --------------------------------------------------------- the status bar
@@ -828,54 +1019,206 @@ fn wordmark(ui: &mut egui::Ui, strip: egui::Rect, align: egui::Align2) {
     );
 }
 
-/// A control's name and where it is currently set. Concatenated rather than
-/// run through `tf`: there is no sentence here for word order to scramble.
-fn dialled(name: &str, value: f32) -> String {
-    format!("{name}  {}", value.round() as i32)
-}
-
 /// A chrome glyph as a button, sized to sit in a 44 px bar.
 fn glyph_button(ui: &mut egui::Ui, glyph: Glyph, enabled: bool) -> egui::Response {
     super::icons::glyph_button(ui, glyph, enabled, egui::vec2(26.0, 24.0))
 }
 
-/// Where the tool pill's backdrop goes: centred on the canvas, at the width it
-/// is actually about to be drawn at.
+/// Where the tool pill's backdrop goes: centred on the canvas, at the height
+/// the options row has currently opened to.
 ///
-/// It used to be anchored on the *widest* form the pill can take, so the seven
-/// tool buttons never moved when Select dropped the options group. That kept the
-/// buttons still and left the bar 72px left of centre in the **resting** state —
-/// Select, nothing chosen — which is the state the editor sits in and therefore
-/// the one you look at. Reported as the toolbar not being centred in the frame,
-/// and it was. The old cost is back with it: switching between Select and a
-/// drawing tool shifts the bar by half the options group.
-///
-/// Pure, and the same function the painter uses, so the test that says "centred"
-/// is testing the placement rather than restating the arithmetic.
-fn pill_rect(canvas: egui::Rect, drawing: bool, can_delete: bool) -> egui::Rect {
-    let width = pill_width(drawing, can_delete);
-    let height = super::icons::BUTTON + theme::PILL_PAD * 2.0;
+/// Pure, and the same function the painter uses, so the test that says
+/// "centred" is testing the placement rather than restating the arithmetic.
+fn pill_rect(canvas: egui::Rect, width: f32, grow: f32) -> egui::Rect {
+    let closed = super::icons::BUTTON + theme::PILL_PAD * 2.0;
+    let extra = HAIRLINE_GAP + 1.0 + OPT_PAD_TOP + OPT_ROW_H;
     egui::Rect::from_min_size(
         egui::pos2(canvas.center().x - width / 2.0, canvas.min.y + 14.0),
-        egui::vec2(width, height),
+        egui::vec2(width, closed + extra * grow),
     )
 }
 
-/// How wide the tool pill needs to be for what it is about to hold: six drawing
-/// tools, a separator and Select, then whatever options the current tool has.
+/// The seven tool buttons and the separator, without the capsule's padding.
 ///
-/// One function, because the backdrop is painted before the widgets that sit on
-/// it: the width that places the glass and the width its contents take have to
-/// come from the same place, or the bar sits off to one side of its own buttons.
-fn pill_width(drawing: bool, can_delete: bool) -> f32 {
-    let tools = super::icons::BUTTON * 7.0 + SEP_W + theme::PILL_GAP * 7.0 + theme::PILL_PAD * 2.0;
-    if drawing {
-        tools + SEP_W + OPT_COLOR_W + OPT_SLIDER_W + theme::PILL_GAP * 3.0
-    } else if can_delete {
-        tools + SEP_W + OPT_COLOR_W + theme::PILL_GAP * 2.0
+/// Fixed, whatever the tool: this is the promise the whole layout rests on.
+/// The bar used to be sized to its *current* contents, so switching between
+/// Select and a drawing tool shifted every button sideways by half the options
+/// group. Now the options live under the buttons and cannot reach them.
+fn tool_row_width() -> f32 {
+    super::icons::BUTTON * 7.0 + SEP_W + theme::PILL_GAP * 7.0
+}
+
+/// How wide the capsule is drawn: whatever the tool in hand needs.
+///
+/// Following the current row rather than the widest one costs nothing, which
+/// took a wrong turn to see. Both the capsule and the tool row are centred on
+/// the canvas, so they share a centre line — the capsule's *edges* move as the
+/// row changes and the buttons do not. Sizing it to the widest row instead only
+/// left the short rows swimming in empty glass.
+///
+/// Eased rather than jumped, so switching tools reads as one object changing
+/// shape instead of two different bars.
+fn capsule_width(ui: &egui::Ui, open: bool, tool: Tool) -> f32 {
+    let content = if open {
+        (row_width(ui, tool) + OPT_PAD_X * 2.0).max(tool_row_width())
     } else {
-        tools
+        tool_row_width()
+    };
+    let target = content + theme::PILL_PAD * 2.0;
+    ui.ctx()
+        .animate_value_with_time(egui::Id::new("pill_width"), target, 0.20)
+}
+
+/// One control's footprint in the options row.
+enum Item {
+    /// The five inks, which travel together.
+    Swatches,
+    Divider,
+    Caption(&'static str),
+    /// A caption, a track and a readout.
+    Slider(&'static str),
+    Stepper,
+    Pill(&'static str),
+    Square,
+}
+
+impl Item {
+    /// Width, and how many widgets it allocates — the second is what decides
+    /// how many gaps fall between them.
+    fn extent(&self, ui: &egui::Ui) -> (f32, f32) {
+        match self {
+            Item::Swatches => (controls::SWATCH * 5.0, 5.0),
+            Item::Divider => (controls::DIVIDER_W, 1.0),
+            Item::Caption(s) => (controls::text_w(ui, s), 1.0),
+            Item::Slider(s) => (
+                controls::text_w(ui, s) + controls::TRACK_W + controls::READOUT_W,
+                3.0,
+            ),
+            Item::Stepper => (controls::STEPPER_W, 1.0),
+            Item::Pill(s) => (controls::text_w(ui, s) + controls::PILL_PAD_X * 2.0, 1.0),
+            Item::Square => (controls::SQUARE, 1.0),
+        }
     }
+}
+
+/// What a tool's options row is made of, in order.
+///
+/// The single description the width and the drawing both come from — or would,
+/// if egui let a row be built from data. It cannot, because each control needs
+/// a different `&mut`, so the drawing is written out by hand in `tool_options`
+/// and a test lays out every row for real and fails if the two drift apart.
+fn row_items(tool: Tool) -> Vec<Item> {
+    let stroke = || Item::Slider(t("Stroke"));
+    match tool {
+        Tool::Arrow => {
+            let mut v = vec![Item::Swatches, Item::Divider, stroke(), Item::Divider];
+            v.extend(HEADS.map(|(_, name)| Item::Pill(t(name))));
+            v
+        }
+        Tool::Text => vec![
+            Item::Swatches,
+            Item::Divider,
+            Item::Caption(t("Size")),
+            Item::Stepper,
+            Item::Divider,
+            Item::Square,
+            Item::Divider,
+            Item::Square,
+            Item::Square,
+            Item::Square,
+        ],
+        Tool::Rect => vec![
+            Item::Swatches,
+            Item::Divider,
+            stroke(),
+            Item::Divider,
+            Item::Caption(t("Fill")),
+            Item::Square,
+            Item::Caption(t("Corner")),
+            Item::Stepper,
+        ],
+        Tool::Ellipse => vec![
+            Item::Swatches,
+            Item::Divider,
+            stroke(),
+            Item::Divider,
+            Item::Caption(t("Fill")),
+            Item::Square,
+        ],
+        Tool::Blur => {
+            let mut v: Vec<Item> = COVERS.iter().map(|(_, n)| Item::Pill(t(n))).collect();
+            v.push(Item::Divider);
+            v.push(Item::Slider(t("Amount")));
+            v.push(Item::Divider);
+            v.push(Item::Caption(t("Pixelate survives a re-encode.")));
+            v
+        }
+        Tool::Highlight => vec![
+            Item::Swatches,
+            Item::Divider,
+            Item::Slider(t("Opacity")),
+        ],
+        Tool::Select | Tool::Fill => {
+            let mut v: Vec<Item> = ORDERING.iter().map(|(_, n)| Item::Pill(t(n))).collect();
+            v.push(Item::Pill(t("Duplicate")));
+            v.push(Item::Divider);
+            v.push(Item::Square);
+            v
+        }
+    }
+}
+
+/// How wide one tool's options row lays out — the controls only, without the
+/// inline padding that keeps them off the capsule's edge.
+fn row_width(ui: &egui::Ui, tool: Tool) -> f32 {
+    let (width, widgets) = row_items(tool)
+        .iter()
+        .map(|item| item.extent(ui))
+        .fold((0.0, 0.0), |(w, n), (iw, in_)| (w + iw, n + in_));
+    width + controls::GAP * (widgets - 1.0).max(0.0)
+}
+
+/// The animation the capsule opens on.
+///
+/// egui's animator ramps linearly; the design asks for
+/// `cubic-bezier(.22, .75, .3, 1)`, which is most of its travel in the first
+/// third. Solved rather than approximated, because the whole point of the two
+/// offset curves is that they are *different* shapes — an eased height against
+/// a linear fade — and two eyeballed ease-outs would land on the same one.
+fn ease(t: f32) -> f32 {
+    const X1: f32 = 0.22;
+    const Y1: f32 = 0.75;
+    const X2: f32 = 0.3;
+    const Y2: f32 = 1.0;
+    let bez = |a: f32, b: f32, u: f32| {
+        let v = 1.0 - u;
+        3.0 * v * v * u * a + 3.0 * v * u * u * b + u * u * u
+    };
+    if t <= 0.0 {
+        return 0.0;
+    }
+    if t >= 1.0 {
+        return 1.0;
+    }
+    // Newton on x(u) = t. The curve is monotonic in u, so a handful of steps
+    // is plenty and no bracketing is needed.
+    let mut u = t;
+    for _ in 0..6 {
+        let x = bez(X1, X2, u) - t;
+        let v = 1.0 - u;
+        let dx = 3.0 * v * v * X1 + 6.0 * v * u * (X2 - X1) + 3.0 * u * u * (1.0 - X2);
+        if dx.abs() < 1e-6 {
+            break;
+        }
+        u -= x / dx;
+        u = u.clamp(0.0, 1.0);
+    }
+    bez(Y1, Y2, u)
+}
+
+/// One named animation, so the two curves cannot collide on an id.
+fn anim(ctx: &egui::Context, name: &str, on: bool, seconds: f32) -> f32 {
+    ctx.animate_bool_with_time(egui::Id::new(name), on, seconds)
 }
 
 /// A hairline between groups in a horizontal bar.
@@ -889,52 +1232,105 @@ fn separator(ui: &mut egui::Ui) {
 mod tests {
     use super::*;
 
-    /// The pill is centred in the canvas at every width it can take.
+    /// The pill is centred in the canvas however far the options row has
+    /// opened.
     ///
-    /// It was anchored on the *widest* form it could take while being drawn at its
-    /// current one, so with the options group absent — Select, nothing chosen,
-    /// which is the state the editor rests in — the bar sat 72 px left of centre.
-    /// Reported as the toolbar not being centred in the frame.
-    ///
-    /// Asserted on `pill_rect` — the function the painter itself calls — so this
-    /// checks the placement rather than restating the arithmetic. Anchoring on any
-    /// width other than the one being drawn fails it.
+    /// It was once anchored on the *widest* form it could take while being
+    /// drawn at its current one, so in the resting state — Select, nothing
+    /// chosen — the bar sat 72px left of centre. Reported as the toolbar not
+    /// being centred in the frame.
     #[test]
-    fn the_tool_pill_is_centred_whatever_it_is_holding() {
-        // A canvas that starts well right of the window's left edge, as the real
-        // one does: the card takes the left of the window, so a pill centred on
-        // the *window* instead would pass a symmetric test and fail this one.
+    fn the_tool_pill_is_centred_however_far_it_has_opened() {
+        // A canvas that starts well right of the window's left edge, as the
+        // real one does: a pill centred on the *window* instead would pass a
+        // symmetric test and fail this one.
         let canvas = egui::Rect::from_min_max(egui::pos2(336.0, 60.0), egui::pos2(1280.0, 800.0));
-        for (drawing, can_delete, what) in [
-            (true, false, "a drawing tool, with its options"),
-            (false, true, "Select with a shape chosen, so Delete shows"),
-            (false, false, "Select with nothing chosen — the resting state"),
-        ] {
-            let rect = pill_rect(canvas, drawing, can_delete);
+        for grow in [0.0_f32, 0.3, 1.0] {
+            let rect = pill_rect(canvas, 420.0, grow);
             assert!(
                 (rect.center().x - canvas.center().x).abs() < 0.01,
-                "{what}: the pill's centre is {}, the canvas's is {}",
+                "at grow={grow} the pill's centre is {}, the canvas's is {}",
                 rect.center().x,
                 canvas.center().x
-            );
-            assert!(
-                rect.width() > 0.0 && rect.height() > 0.0,
-                "{what}: the pill has no area"
             );
         }
     }
 
-    /// Every form of the pill has to be narrower than the one the hide test uses,
-    /// or the bar can vanish for a tool that would in fact have fitted.
+    /// The capsule grows *downward only*. If its top ever moved, the tool
+    /// buttons would slide up and down as the options row opened, which is the
+    /// one thing the docked row exists to avoid.
     #[test]
-    fn the_widest_pill_really_is_the_widest() {
-        let widest = pill_width(true, false);
-        for (drawing, can_delete) in [(false, true), (false, false)] {
+    fn opening_the_options_row_moves_only_the_bottom_edge() {
+        let canvas = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1280.0, 800.0));
+        let shut = pill_rect(canvas, 420.0, 0.0);
+        let open = pill_rect(canvas, 420.0, 1.0);
+        assert_eq!(shut.min.y, open.min.y, "the capsule's top edge moved");
+        assert!(
+            open.height() > shut.height(),
+            "the capsule did not grow at all"
+        );
+        assert_eq!(
+            shut.height(),
+            super::super::icons::BUTTON + theme::PILL_PAD * 2.0,
+            "the closed capsule is no longer exactly the tool row"
+        );
+    }
+
+    /// The capsule follows the row it is holding, and the tool row stays put
+    /// anyway — both are centred on the canvas, so they share a centre line and
+    /// only the capsule's edges move.
+    ///
+    /// Reported as uneven padding: the row was centred in a capsule sized for
+    /// the *widest* row, so every short row sat in a pool of empty glass.
+    #[test]
+    fn the_capsule_follows_its_row_without_moving_the_buttons() {
+        let canvas = egui::Rect::from_min_max(egui::pos2(336.0, 60.0), egui::pos2(1280.0, 800.0));
+        for width in [tool_row_width(), 520.0, 700.0] {
+            let rect = pill_rect(canvas, width, 1.0);
+            let row_centre = rect.center().x;
             assert!(
-                pill_width(drawing, can_delete) <= widest,
-                "drawing={drawing} can_delete={can_delete} is wider than the form used to hide it"
+                (row_centre - canvas.center().x).abs() < 0.01,
+                "at capsule width {width} the tool row's centre moved to {row_centre}"
             );
         }
+    }
+
+    /// The whole promise of the layout: the tool row's width does not depend on
+    /// which tool is in hand.
+    #[test]
+    fn the_tool_row_is_the_same_width_for_every_tool() {
+        let w = tool_row_width();
+        assert!(w > 0.0);
+        assert_eq!(
+            w,
+            super::super::icons::BUTTON * 7.0 + SEP_W + theme::PILL_GAP * 7.0,
+            "seven buttons, one separator and the gaps between them"
+        );
+    }
+
+    /// The opening curve has to start and end where the animation does, and
+    /// never go backwards on the way — an eased height that overshoots would
+    /// show as the capsule bouncing.
+    #[test]
+    fn the_opening_curve_runs_from_shut_to_open_without_turning_back() {
+        assert_eq!(ease(0.0), 0.0);
+        assert_eq!(ease(1.0), 1.0);
+        let mut last = 0.0_f32;
+        for i in 0..=50 {
+            let v = ease(i as f32 / 50.0);
+            assert!(
+                (0.0..=1.0).contains(&v),
+                "the curve left the unit range at t={}: {v}",
+                i as f32 / 50.0
+            );
+            assert!(v >= last - 1e-4, "the curve went backwards at t={}", i as f32 / 50.0);
+            last = v;
+        }
+        assert!(
+            ease(0.33) > 0.6,
+            "the curve is no longer front-loaded, so the height and the fade \
+             have become the same shape"
+        );
     }
 
     fn window(w: f32, h: f32) -> Shell {

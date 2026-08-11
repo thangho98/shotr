@@ -101,6 +101,7 @@ src/
     mod.rs          application state and the eframe entry point
     shell.rs        the editor's own window: frame, overhanging sidebar card,
                     tool pill, top bar, status bar, drag and resize
+    controls.rs       └─ the controls the tool pill's options row is built from
     canvas.rs       the central image area and all pointer interaction
     sidebar.rs      what goes inside the sidebar card
     icons.rs        tool and chrome glyphs, drawn rather than shipped
@@ -464,6 +465,38 @@ loose inside a frame that had fitted it a frame earlier — reported as the fram
 being too big, which sends you looking at `selection_rect` where nothing is
 wrong. `text::px_scale` converts, and a test lays the same string out both ways
 and fails if they drift apart.
+
+**The tool pill is one capsule that grows downward, and its width is fixed.**
+The options belonging to a tool used to sit to the *right* of the buttons, so
+the bar changed width whenever the tool changed and every button slid sideways
+with it. They now live under a hairline inside the same capsule, which opens
+downward when a tool is chosen. The closed state is exactly the tool row, which
+only Select-with-nothing-selected ever reaches.
+
+The capsule follows the row it is holding, and this is worth stating because the
+first attempt got it backwards: it was sized to the *widest* row on the reasoning
+that following the current one would put the buttons back to sliding about.
+It does not. The capsule and the tool row are both centred on the canvas, so
+they share a centre line — the capsule's *edges* move and the buttons do not.
+Sizing to the widest row only left every short row swimming in empty glass,
+which is what "the padding is uneven" meant. The inline padding also has to sit
+*around* the row rather than inside its measured width, or the whole row lands
+half the padding off centre.
+
+The row's width is measured by `row_items` and drawn by `tool_options`, which
+are different code. They have to be, because egui cannot build a row from data
+when every control needs a different `&mut`. The backdrop is painted before the
+contents, so a control added to one and not the other would show as a row
+overflowing its own glass — hence the `debug_assert` comparing the two after
+every layout. Nothing else catches it.
+
+**A control drawn without something behind it is worse than a missing one.**
+The options row's design specifies a font dropdown and B/I toggles. Those need a
+font *file* per face registered in both egui and `ab_glyph` — one nominal size
+already meant two different sizes to those two engines, and weight would be the
+same trap again — so they are not drawn at all rather than drawn dead. Paint's
+"Width" went the same way: it means a brush, and paint here is a rectangular
+marker.
 
 **Nothing that follows the pointer may set `dirty`.** One preview render costs
 275ms at the default look and up to 2s with a big shadow — measured with
