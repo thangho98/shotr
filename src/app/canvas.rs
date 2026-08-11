@@ -251,6 +251,9 @@ impl ShotrApp {
         if self.ocr_mode == OcrMode::Off {
             self.annotation_input(&resp, &to_shot, &to_screen, &ui_painter);
             self.sync_detached();
+            if let Some(p) = resp.hover_pos() {
+                self.paint_ghost(ui.painter(), to_shot(p), &to_screen);
+            }
             self.paint_annotation_overlay(ui.painter(), &to_screen);
         } else {
             self.ocr_input(&resp, &to_shot);
@@ -503,17 +506,44 @@ impl ShotrApp {
                     self.status = t("Type — Enter to finish, Esc to cancel").into();
                 }
             }
+            Tool::Badge => {
+                if resp.clicked()
+                    && let Some(p) = resp.interact_pointer_pos()
+                {
+                    let mut badge = self.new_layer(Tool::Badge, to_shot(p));
+                    badge.text = self.next_badge().to_string();
+                    self.undo.push(&self.layers);
+                    self.layers.push(badge);
+                    self.dirty = true;
+                }
+            }
             tool => {
                 if resp.drag_started()
                     && let Some(p) = resp.interact_pointer_pos()
                 {
-                    self.draft = Some(self.new_layer(tool, to_shot(p)));
+                    let mut draft = self.new_layer(tool, to_shot(p));
+                    if self.freehand() {
+                        draft.path.push(to_shot(p));
+                    }
+                    self.draft = Some(draft);
                 }
                 if resp.dragged()
                     && let Some(p) = resp.interact_pointer_pos()
                     && let Some(draft) = self.draft.as_mut()
                 {
-                    draft.b = to_shot(p);
+                    let at = to_shot(p);
+                    draft.b = at;
+                    if !draft.path.is_empty() {
+                        // Only when the pointer has actually moved: a stationary
+                        // press otherwise piles hundreds of identical points
+                        // into the layer, and every one of them is a segment
+                        // the distance field has to walk.
+                        let last = draft.path[draft.path.len() - 1];
+                        let moved = (at[0] - last[0]).abs() + (at[1] - last[1]).abs();
+                        if moved > 1.0 {
+                            draft.path.push(at);
+                        }
+                    }
                 }
                 if resp.drag_stopped() {
                     self.commit_draft();
@@ -646,6 +676,9 @@ impl ShotrApp {
             && let Some(p) = resp.interact_pointer_pos()
         {
             self.selected_layer = layer_at(painter, &self.layers, to_shot(p));
+            if let Some(i) = self.selected_layer {
+                self.load_dials_from(i);
+            }
         }
 
         if resp.drag_started()
@@ -653,7 +686,13 @@ impl ShotrApp {
         {
             // The knob wins over the shape under it: it is deliberately outside
             // the frame, but a small shape leaves the two close together.
-            self.turn_from = self.grabbed_handle(painter, p, to_screen);
+            self.tail_drag = self.grabbed_tail(p, to_screen);
+            if self.tail_drag {
+                self.undo.push(&self.layers);
+            }
+            self.turn_from = (!self.tail_drag)
+                .then(|| self.grabbed_handle(painter, p, to_screen))
+                .flatten();
             if self.turn_from.is_some() {
                 // A turn writes itself onto the layer frame by frame, so the
                 // only moment there is still an old angle to keep is this one.
@@ -661,6 +700,9 @@ impl ShotrApp {
             } else {
                 let at = to_shot(p);
                 self.selected_layer = layer_at(painter, &self.layers, at);
+                if let Some(i) = self.selected_layer {
+                    self.load_dials_from(i);
+                }
                 self.move_delta = self.selected_layer.map(|_| [0.0, 0.0]);
                 self.drag_anchor = Some(at);
             }
@@ -668,7 +710,14 @@ impl ShotrApp {
         if resp.dragged()
             && let Some(p) = resp.interact_pointer_pos()
         {
-            if let (Some(grab), Some(i)) = (self.turn_from, self.selected_layer) {
+            if self.tail_drag {
+                if let Some(layer) = self.selected_layer.and_then(|i| self.layers.get_mut(i)) {
+                    // The tail follows the pointer; the tip stays where it was.
+                    // Nothing else to set — the arrow's size and direction are
+                    // both read off these two points.
+                    layer.a = to_shot(p);
+                }
+            } else if let (Some(grab), Some(i)) = (self.turn_from, self.selected_layer) {
                 let at = to_shot(p);
                 if let Some(layer) = self.layers.get_mut(i) {
                     let c = layer.centre();
@@ -683,6 +732,12 @@ impl ShotrApp {
             }
         }
         if resp.drag_stopped() {
+            if self.tail_drag {
+                self.tail_drag = false;
+                self.move_delta = None;
+                self.drag_anchor = None;
+                return;
+            }
             // A turn is written straight onto the layer as it happens, so
             // there is nothing to commit here beyond ending the gesture.
             if self.turn_from.take().is_some() {
@@ -732,7 +787,26 @@ impl ShotrApp {
         // costs 200–600ms for one preview of this size, so re-rendering per
         // frame turns a drag into a slideshow. Measured with
         // `examples/render_demo`.
-        (self.drag_anchor.is_some() || self.turn_from.is_some()).then_some(i)
+        (self.drag_anchor.is_some() || self.turn_from.is_some() || self.tail_drag).then_some(i)
+    }
+
+    /// Whether a press landed on the arrow's tail handle.
+    ///
+    /// Checked before the rotate knob, and before the shape itself, because the
+    /// handle sits *on* the arrow: whichever is tested first wins, and a press
+    /// on a 12px dot is far more likely to mean the dot.
+    fn grabbed_tail(&self, p: egui::Pos2, to_screen: &dyn Fn([f32; 2]) -> egui::Pos2) -> bool {
+        if self.tool != Tool::Select {
+            return false;
+        }
+        let Some(layer) = self.selected_layer.and_then(|i| self.layers.get(i)) else {
+            return false;
+        };
+        if layer.kind != Tool::Arrow {
+            return false;
+        }
+        // Generous, because nobody aims at a 6px dot.
+        (p - to_screen(layer.a)).length() <= TURN_KNOB + 9.0
     }
 
     /// The angle the pointer sits at, if a drag started on the rotate knob.
@@ -760,6 +834,97 @@ impl ShotrApp {
         }
         let c = to_screen(layer.centre());
         Some((p.y - c.y).atan2(p.x - c.x) - layer.angle)
+    }
+
+    /// A pale copy of what the next drag would leave, following the pointer.
+    ///
+    /// It answers the question the tool row cannot: not *which tool* is in hand
+    /// but which of its forms, at what colour and what size. It goes through
+    /// `paint_layer_preview` like everything else — a third drawing path would
+    /// be a fifth place to drift from what the exporter bakes.
+    ///
+    /// Never sets `dirty`: it is overlay only, so it costs a repaint and not a
+    /// render.
+    fn paint_ghost(
+        &self,
+        painter: &egui::Painter,
+        at: [f32; 2],
+        to_screen: &dyn Fn([f32; 2]) -> egui::Pos2,
+    ) {
+        // Nothing to preview while the real thing is being drawn, and nothing
+        // to preview for a tool that draws nothing.
+        if self.draft.is_some() || self.tool == Tool::Select || self.tool == Tool::Fill {
+            return;
+        }
+        let Some(ghost) = self.ghost_layer(at) else {
+            return;
+        };
+        // Pale, so it reads as a promise rather than as ink already down. No
+        // rim: a translucent white ring under translucent ink turns the whole
+        // ghost muddy, and the ghost's job is to say which shape and what
+        // colour, not to be a faithful copy.
+        let mut ghost = ghost;
+        ghost.color[3] = (ghost.color[3] as f32 * GHOST_ALPHA) as u8;
+        ghost.border = 0.0;
+        if ghost.kind == Tool::Text {
+            paint_text_layer(painter, &ghost, to_screen);
+        } else {
+            paint_layer_preview(painter, &ghost, to_screen);
+        }
+    }
+
+    /// The shape the ghost stands for, at a size that reads without pretending
+    /// to be the size the drag will actually give it.
+    fn ghost_layer(&self, at: [f32; 2]) -> Option<Layer> {
+        let reach = GHOST_REACH / self.preview_scale.max(f32::EPSILON);
+        let mut ghost = self.new_layer(self.tool, at);
+        // The pointer is the ghost's top-left corner, not its middle: a drag
+        // starts where the cursor is, so a ghost centred on it promises a shape
+        // half of which is behind where the drag will begin.
+        match self.tool {
+            // The tip goes *at* the pointer and the tail falls away behind it
+            // on the diagonal: that is the gesture the tool is for, and it puts
+            // the ghost's own top-left corner under the cursor like every other
+            // one.
+            Tool::Arrow => {
+                let run = reach * std::f32::consts::FRAC_1_SQRT_2;
+                ghost.a = [at[0] + run, at[1] + run];
+                ghost.b = at;
+            }
+            Tool::Line => {
+                ghost.a = at;
+                ghost.b = [at[0] + reach, at[1] + reach * 0.55];
+            }
+            Tool::Text => ghost.text = GHOST_TEXT.to_owned(),
+            // A badge is placed by a click rather than dragged, so its ghost is
+            // the disc itself — and it shows the number the click would leave,
+            // which is the only thing about it that is not obvious.
+            Tool::Badge => {
+                ghost.a = [at[0] + ghost.font_size, at[1] + ghost.font_size];
+                ghost.text = self.next_badge().to_string();
+            }
+            _ if self.freehand() => {
+                // A stroke, not a block: the block ghost promised the wrong
+                // tool entirely.
+                let step = reach / 4.0;
+                ghost.path = (0..=4)
+                    .map(|i| {
+                        let t = i as f32 / 4.0;
+                        [
+                            at[0] + t * reach,
+                            at[1] + (t * std::f32::consts::PI).sin() * step,
+                        ]
+                    })
+                    .collect();
+                ghost.a = ghost.path[0];
+                ghost.b = ghost.path[0];
+            }
+            _ => {
+                ghost.a = at;
+                ghost.b = [at[0] + reach, at[1] + reach * 0.6];
+            }
+        }
+        Some(ghost)
     }
 
     fn paint_annotation_overlay(
@@ -896,6 +1061,36 @@ fn paint_selection(
     }
     let accent = crate::app::theme::ACCENT.gamma_multiply(fade);
     let stroke = egui::Stroke::new(1.5_f32, accent);
+
+    // A shape with a silhouette of its own gets traced; everything else gets a
+    // dashed box. Two marks on purpose: an outline is only worth drawing when
+    // there is an edge to follow, and a blur has none — tracing its box would
+    // just be the dashed frame with the dashes taken out.
+    if layer.kind == Tool::Arrow {
+        let pts: Vec<egui::Pos2> = crate::annotate::arrow_points(layer)
+            .into_iter()
+            .map(&to_screen)
+            .collect();
+        if pts.len() >= 3 {
+            painter.add(egui::Shape::closed_line(pts, stroke));
+            // One handle, at the tail, because one drag does both jobs: how far
+            // it is from the tip is the size, and which way it lies is the
+            // direction. A second knob would be a second control for the same
+            // two numbers.
+            let tail = to_screen(layer.a);
+            // White, not the palette's ink: the handle sits on the picture,
+            // where a colour that follows the desktop theme would vanish into
+            // half the screenshots people take.
+            painter.circle(
+                tail,
+                TURN_KNOB + 1.0,
+                egui::Color32::WHITE,
+                egui::Stroke::new(2.0_f32, accent),
+            );
+        }
+        return;
+    }
+
     let rect = selection_rect(painter, layer, to_screen);
 
     // Dashes are laid along the path from its start, so going round the corners
@@ -958,12 +1153,29 @@ fn selection_rect(
     to_screen: &dyn Fn([f32; 2]) -> egui::Pos2,
 ) -> egui::Rect {
     let a = to_screen(layer.a);
+    let unit = screen_unit(to_screen);
+    // A freehand mark is a path, so its two corners say nothing: `b` never
+    // moved off `a` and a frame taken from them is a dot at the stroke's start.
+    if !layer.path.is_empty() {
+        let mut r = egui::Rect::NOTHING;
+        for p in &layer.path {
+            r = r.union(egui::Rect::from_center_size(
+                to_screen(*p),
+                egui::Vec2::splat(1.0),
+            ));
+        }
+        return r.expand((layer.stroke * unit).max(1.0) / 2.0 + 5.0);
+    }
+    // A badge is a disc placed by a click, so it has no second corner either.
+    if layer.kind == Tool::Badge {
+        let r = (layer.font_size * unit).max(4.0);
+        return egui::Rect::from_center_size(a, egui::Vec2::splat(r * 2.0)).expand(5.0);
+    }
     if layer.kind == Tool::Text {
         let galley = text_galley(painter, layer, to_screen, egui::Color32::WHITE);
         let start = a - egui::vec2(galley.size().x * align_shift(layer.align), 0.0);
         return egui::Rect::from_min_size(start, galley.size()).expand(5.0);
     }
-    let unit = (to_screen([1.0, 0.0]).x - to_screen([0.0, 0.0]).x).abs();
     let half = (layer.stroke * unit).max(1.0) / 2.0;
     egui::Rect::from_two_pos(a, to_screen(layer.b)).expand(half + 5.0)
 }
@@ -986,7 +1198,7 @@ fn stroke_shape(
     let (a, b) = (layer.a, layer.b);
 
     match layer.kind {
-        Tool::Arrow => {
+        Tool::Line => {
             let len = ((b[0] - a[0]).powi(2) + (b[1] - a[1]).powi(2)).sqrt();
             if len < 1.0 {
                 return;
@@ -1002,7 +1214,7 @@ fn stroke_shape(
             let neck = [(l[0] + r[0]) / 2.0, (l[1] + r[1]) / 2.0];
 
             let shaft = match layer.head {
-                Head::Open => vec![(a, b)],
+                Head::None | Head::Open => vec![(a, b)],
                 Head::Solid => vec![(a, neck)],
                 Head::Dashed => dashes(a, neck, layer.stroke * 2.0),
             };
@@ -1016,6 +1228,7 @@ fn stroke_shape(
                 }
             }
             match layer.head {
+                Head::None => {}
                 Head::Open => {
                     for barb in [l, r] {
                         painter.line_segment([place(b), place(barb)], stroke);
@@ -1126,28 +1339,7 @@ fn dashes(a: [f32; 2], b: [f32; 2], gap: f32) -> Vec<([f32; 2], [f32; 2])> {
     out
 }
 
-/// Fill a closed outline that may be concave.
-///
-/// epaint's `convex_polygon` is exactly what its name says, and the arrow has a
-/// notch where the head meets the shaft. Fanning triangles from the centroid
-/// would fail on the same notch. What does work here is that the outline is
-/// *two walks of the same spine*: point `i` on one side pairs with point
-/// `n-1-i` on the other, so the shape falls apart into quads that are each
-/// convex, share their edges, and leave no seam once drawn in one colour.
-fn fill_concave(painter: &egui::Painter, pts: &[egui::Pos2], color: egui::Color32) {
-    let n = pts.len();
-    for i in 0..n / 2 {
-        let (a, b) = (pts[i], pts[n - 1 - i]);
-        let (c, d) = (pts[i + 1], pts[n - 2 - i]);
-        painter.add(egui::Shape::convex_polygon(
-            vec![a, c, d, b],
-            color,
-            egui::Stroke::NONE,
-        ));
-    }
-}
-
-/// How far one shot pixel travels on screen.
+/// How far one shot pixel travels on screen./// How far one shot pixel travels on screen.
 fn screen_unit(to_screen: &dyn Fn([f32; 2]) -> egui::Pos2) -> f32 {
     (to_screen([1.0, 0.0]).x - to_screen([0.0, 0.0]).x)
         .abs()
@@ -1214,7 +1406,7 @@ fn paint_layer_preview(
                         egui::Stroke::new(rim * 2.0, rim_ink),
                     ));
                 }
-                fill_concave(painter, &pts, color);
+                super::icons::fill_outline(painter, &pts, color);
             }
         }
         Tool::Line | Tool::Rect | Tool::Ellipse => {
@@ -1233,10 +1425,31 @@ fn paint_layer_preview(
             }
             stroke_shape(painter, layer, to_screen, stroke)
         }
+        Tool::Highlight if !layer.path.is_empty() => {
+            // A pen leaves round ends and round joints, which is what the union
+            // of capsules in the exporter gives. `line` has neither, so the
+            // joints get a dot each.
+            let pts: Vec<egui::Pos2> = layer.path.iter().map(|p| to_screen(*p)).collect();
+            painter.add(egui::Shape::line(pts.clone(), stroke));
+            for p in pts {
+                painter.circle_filled(p, stroke.width / 2.0, color);
+            }
+        }
         Tool::Highlight => {
-            let pts: Vec<egui::Pos2> = corners(layer.a, layer.b)
-                .map(|p| to_screen(turn_in_shot(layer, p)))
-                .to_vec();
+            let pts: Vec<egui::Pos2> = if layer.oval {
+                let (cx, cy) = ((layer.a[0] + layer.b[0]) / 2.0, (layer.a[1] + layer.b[1]) / 2.0);
+                let (rx, ry) = ((layer.b[0] - layer.a[0]) / 2.0, (layer.b[1] - layer.a[1]) / 2.0);
+                (0..48)
+                    .map(|i| {
+                        let t = i as f32 / 48.0 * std::f32::consts::TAU;
+                        to_screen(turn_in_shot(layer, [cx + rx * t.cos(), cy + ry * t.sin()]))
+                    })
+                    .collect()
+            } else {
+                corners(layer.a, layer.b)
+                    .map(|p| to_screen(turn_in_shot(layer, p)))
+                    .to_vec()
+            };
             if rim > 0.5 {
                 let c = layer.border_color;
                 painter.add(egui::Shape::convex_polygon(
@@ -1261,9 +1474,28 @@ fn paint_layer_preview(
             );
             painter.rect_filled(rect, 0.0, egui::Color32::from_black_alpha(90));
         }
+        Tool::Badge => {
+            let r = layer.font_size * screen_unit(to_screen);
+            painter.circle_filled(a, r, color);
+            painter.text(
+                a,
+                egui::Align2::CENTER_CENTER,
+                &layer.text,
+                egui::FontId::new((r * 1.1).max(6.0), egui::FontFamily::Proportional),
+                egui::Color32::WHITE,
+            );
+        }
         Tool::Text | Tool::Select | Tool::Fill => {}
     }
 }
+
+/// How solid the ghost is against the real thing.
+const GHOST_ALPHA: f32 = 0.45;
+/// How big the ghost is drawn, in preview points.
+const GHOST_REACH: f32 = 76.0;
+/// What a text ghost says. Two letters, so it shows both cases at the size the
+/// label will actually be.
+const GHOST_TEXT: &str = "Aa";
 
 const TURN_ARM: f32 = 26.0;
 const TURN_KNOB: f32 = 5.0;

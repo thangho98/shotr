@@ -133,32 +133,20 @@ pub fn render_detailed(scene: &Scene) -> Rendered {
     let s = scene.style;
     let scale = scene.scale.max(0.01);
 
-    // 1. Annotations are baked into the screenshot before anything else, so
-    //    Balance sees them and the frame clips them like real content.
-    let annotated;
-    let shot: &RgbaImage = if scene.layers.is_empty() {
-        scene.shot
-    } else {
-        let mut copy = scene.shot.clone();
-        crate::annotate::apply(&mut copy, scene.layers, scale, scene.font);
-        annotated = copy;
-        &annotated
-    };
-
-    // 2. Balance: trim uniform margins so the subject sits centred.
+    // 1. Balance: trim uniform margins so the subject sits centred.
     let balanced;
     let mut crop_offset = (0, 0);
     let shot: &RgbaImage = if s.balance {
-        let (x, y, w, h) = frame::content_box(shot, 6);
-        if w != shot.width() || h != shot.height() {
+        let (x, y, w, h) = frame::content_box(scene.shot, 6);
+        if w != scene.shot.width() || h != scene.shot.height() {
             crop_offset = (x, y);
-            balanced = image::imageops::crop_imm(shot, x, y, w, h).to_image();
+            balanced = image::imageops::crop_imm(scene.shot, x, y, w, h).to_image();
             &balanced
         } else {
-            shot
+            scene.shot
         }
     } else {
-        shot
+        scene.shot
     };
 
     let pad = px(s.padding, scale);
@@ -195,7 +183,7 @@ pub fn render_detailed(scene: &Scene) -> Rendered {
     // ultrawide.
     let reserve = |m: &RgbaImage| m.height() + m.height() / 2;
 
-    // 3. Canvas size and how much the screenshot must shrink to fit it.
+    // 2. Canvas size and how much the screenshot must shrink to fit it.
     let (cw, ch, shot_fit) = layout(
         shot.width(),
         shot.height() + stamp.as_ref().map_or(0, reserve),
@@ -237,10 +225,10 @@ pub fn render_detailed(scene: &Scene) -> Rendered {
     // bottom of the padding it was given room in.
     let oy = ((ch.saturating_sub(ih + band)) / 2) as i64;
 
-    // 4. Background.
+    // 3. Background.
     let mut canvas = background::paint(cw, ch, s, scene.bg_image, Some(shot));
 
-    // 5. Drop shadow, cast by the outer (inset) rectangle.
+    // 4. Drop shadow, cast by the outer (inset) rectangle.
     if let Some(shadow) = Shadow::from_strength(s.shadow, scale) {
         let place = frame::Placement {
             origin: (ox, oy),
@@ -251,7 +239,7 @@ pub fn render_detailed(scene: &Scene) -> Rendered {
         image::imageops::overlay(&mut canvas, &layer, 0, 0);
     }
 
-    // 6. The inset frame, then the screenshot inside it. A frame of thickness
+    // 5. The inset frame, then the screenshot inside it. A frame of thickness
     //    `inset` around an outer radius R has an inner radius of R - inset.
     if inset > 0 {
         // The detected colour makes the frame read as part of the captured
@@ -289,6 +277,26 @@ pub fn render_detailed(scene: &Scene) -> Rendered {
                 );
             }
         }
+    }
+
+    // 6. Annotations, on the finished canvas rather than inside the picture.
+    //
+    // They used to be baked into the screenshot before anything else, which
+    // meant the frame clipped them like real content — and made the picture's
+    // edge a wall you could not draw past. An arrow pointing *at* the shot from
+    // the background was impossible, which is most of what an arrow is for.
+    //
+    // Their coordinates stay in shot pixels, so a mark still follows the
+    // picture when the padding or the ratio changes; only the mapping moved.
+    // Balance no longer sees them, which is right — where the subject sits is a
+    // property of the shot, not of what was drawn on top of it.
+    if !scene.layers.is_empty() {
+        let into_canvas = scale * shot_fit;
+        let origin = [
+            sx as f32 - crop_offset.0 as f32 * scale * shot_fit,
+            sy as f32 - crop_offset.1 as f32 * scale * shot_fit,
+        ];
+        crate::annotate::apply(&mut canvas, scene.layers, into_canvas, origin, scene.font);
     }
 
     // 7. The watermark, in the band below the block.
@@ -521,6 +529,97 @@ mod tests {
             let (w, h, _) = layout(400, 300, settings.padding, settings.inset, ratio, 1.0);
             assert_eq!((out.width(), out.height()), (w, h), "ratio {ratio:?}");
         }
+    }
+
+    /// Annotations used to be baked into the screenshot before anything else,
+    /// so the picture's edge was a wall: an arrow pointing *at* the shot from
+    /// the background could not exist, which is most of what an arrow is for.
+    /// They are composited onto the finished canvas now.
+    #[test]
+    fn an_annotation_can_reach_out_onto_the_background() {
+        let shot = RgbaImage::from_pixel(200, 150, Rgba([10, 120, 200, 255]));
+        let settings = Style {
+            padding: 60,
+            shadow: 0,
+            background: crate::settings::Background::None,
+            ..Default::default()
+        };
+        // A block sitting entirely off the top-left corner of the screenshot,
+        // out in the padding.
+        let mut out_there = crate::annotate::Layer::new(
+            crate::annotate::Tool::Rect,
+            [-50.0, -50.0],
+            [255, 0, 0, 255],
+            4.0,
+            20.0,
+            8.0,
+        );
+        out_there.b = [-10.0, -10.0];
+        out_there.filled = true;
+
+        let layers = [out_there];
+        let scene = Scene {
+            layers: &layers,
+            ..Scene::plain(&shot, &settings, 1.0)
+        };
+        let out = render_detailed(&scene);
+        let (ox, oy, _, _) = out.geom.content;
+
+        // Where the block landed: 50px up and left of the screenshot's own
+        // corner, which is background and nothing else.
+        let px = out.image.get_pixel((ox - 30) as u32, (oy - 30) as u32).0;
+        assert!(
+            px[0] > 150 && px[1] < 80 && px[3] > 200,
+            "the background at the block's position reads {px:?}, so the mark \
+             was clipped to the screenshot again"
+        );
+        // And the screenshot itself is untouched by it.
+        let inside = out.image.get_pixel(ox as u32 + 100, oy as u32 + 75).0;
+        assert_eq!(
+            inside,
+            [10, 120, 200, 255],
+            "the mark bled into the picture it was drawn beside"
+        );
+    }
+
+    /// The mark still belongs to the *shot*, not to the canvas: change the
+    /// padding and it has to travel with the picture, or every annotation
+    /// slides off its subject the moment the layout is adjusted.
+    #[test]
+    fn an_annotation_follows_the_picture_when_the_padding_changes() {
+        let shot = RgbaImage::from_pixel(200, 150, Rgba([10, 120, 200, 255]));
+        let mut mark = crate::annotate::Layer::new(
+            crate::annotate::Tool::Rect,
+            [40.0, 40.0],
+            [255, 0, 0, 255],
+            4.0,
+            20.0,
+            8.0,
+        );
+        mark.b = [80.0, 80.0];
+        mark.filled = true;
+        let layers = [mark];
+
+        let at = |padding: u32| {
+            let settings = Style {
+                padding,
+                shadow: 0,
+                ..Default::default()
+            };
+            let scene = Scene {
+                layers: &layers,
+                ..Scene::plain(&shot, &settings, 1.0)
+            };
+            let out = render_detailed(&scene);
+            let (ox, oy, _, _) = out.geom.content;
+            out.image.get_pixel((ox + 60) as u32, (oy + 60) as u32).0
+        };
+        assert_eq!(
+            at(20),
+            at(90),
+            "the mark sits at a different place on the picture once the \
+             padding changes, so it is pinned to the canvas rather than to the shot"
+        );
     }
 
     #[test]

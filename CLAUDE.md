@@ -498,6 +498,45 @@ same trap again — so they are not drawn at all rather than drawn dead. Paint's
 "Width" went the same way: it means a brush, and paint here is a rectangular
 marker.
 
+**A button is a group of forms, not a tool.** Seven buttons cover ten tools:
+the shape key holds a rectangle, a rounded rectangle, an ellipse and a line,
+and pressing it again steps between them. `GROUPS` is the whole vocabulary —
+key, and the stops behind it — and the button's icon follows whichever stop is
+in hand, because with four shapes on one key that icon is the only thing saying
+what a press will draw.
+
+The stops are read back off the dials rather than kept as an index, since the
+options row can move the same dials and a remembered index would go stale the
+moment it did. The remembered index is only where a button *returns* to when it
+is reached from somewhere else, which is what makes a shared key cheap: coming
+back to the ellipse you were just using costs one press, not three.
+
+**A tool key pressed again steps through that tool's forms, and the ghost is
+what says so.** The stops are read back off the dials rather than kept as an
+index — the options row can move the same dials, and a remembered index would
+go stale the moment it did. Shift steps back, so overshooting a four-stop cycle
+costs one press rather than three. Every stop sets a *dial*, never the tool: a
+key that quietly changed which tool was in hand would make the button under it
+lie, and there is a test that says so.
+
+The label sizes are a fraction of the shot's height rather than pixels,
+because the same preset has to mean the same thing on a 1280px shot and a
+3440px one. The options row still shows and edits pixels.
+
+**The ghost is the only thing that reports a cycle step, so it cannot be a
+third drawing path.** It goes through `paint_layer_preview` with a synthetic
+layer built by `new_layer`, which is what stops it drifting from what the
+exporter bakes. It carries no rim: a translucent white ring under translucent
+ink turns the whole thing muddy, and the ghost's job is to say which shape and
+what colour, not to be a faithful copy.
+
+**Two selection marks, on purpose.** A shape with a silhouette of its own gets
+traced — the arrow, whose outline is already computed — and everything else
+gets the dashed box. Tracing is only worth it when there is an edge to follow,
+and a blur has none. The traced arrow gets one handle at its tail rather than a
+rotate knob, because one drag sets both its size and its direction; those are
+the only two numbers it has.
+
 **There are two arrows, and that is the point.** `Tool::Arrow` is one solid
 silhouette with locked proportions — a drag says where it points and how big it
 is, never how fat — which is the mark a marker pen makes. `Tool::Line` is the
@@ -519,6 +558,36 @@ pairs with `n-1-i` and the shape falls into quads that are each convex, share
 edges, and leave no seam in one colour. The rim is that strip stroked
 underneath — the seams are covered by the fill on top, leaving only the outer
 boundary.
+
+**Annotations are composited onto the finished canvas, not baked into the
+screenshot.** They used to go on first, so Balance saw them and the frame
+clipped them like real content — which made the picture's edge a wall you could
+not draw past, and an arrow pointing *at* the shot from the background
+impossible. `render_detailed` now draws them after the shot is placed, using the
+same affine `Geometry::shot_to_canvas` describes.
+
+Their coordinates stay in **shot pixels**, which is the part worth keeping: a
+mark still travels with the picture when the padding or the ratio changes.
+Pinning them to the canvas instead would let them reach the background too, and
+would slide every one of them off its subject the moment the layout was
+adjusted. Two tests hold both halves down.
+
+Balance no longer sees them, which is right — where the subject sits is a
+property of the shot, not of what was drawn on top of it.
+
+**A freehand mark is a path, and it is the one layer that is not two corners.**
+`bounds`, `centre`, `translate` and hit-testing all need a branch for it —
+`b` never moves off `a`, so anything reading the corners measures a dot where
+the stroke started. It rasterises as a union of capsules, one per segment, the
+same way the dashed shaft does, which is what gives it round ends and round
+joints for nothing. Points are only added when the pointer has actually moved:
+a stationary press otherwise piles hundreds of identical points into the layer,
+and every one is a segment the distance field walks per pixel.
+
+**A badge carries its own number.** The counter is `max(existing) + 1` rather
+than a running total beside the layers, so undoing a badge cannot make the next
+one skip — and deleting the third of five leaves the gap where the reader can
+see it, which is the honest answer.
 
 **The rim and the shadow come off the same distance field, in three passes.**
 A red arrow on a red part of the picture disappears, which is what the white

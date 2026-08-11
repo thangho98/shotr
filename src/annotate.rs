@@ -28,6 +28,8 @@ pub enum Tool {
     /// used to be drawn from three capsules went when [`Tool::Arrow`] became a
     /// solid silhouette.
     Line,
+    /// A numbered disc: 1, 2, 3, dropped in the order the reader should follow.
+    Badge,
     Text,
     Blur,
     Highlight,
@@ -38,11 +40,12 @@ pub enum Tool {
 }
 
 impl Tool {
-    pub const DRAWABLE: [Tool; 7] = [
+    pub const DRAWABLE: [Tool; 8] = [
         Tool::Arrow,
         Tool::Rect,
         Tool::Ellipse,
         Tool::Line,
+        Tool::Badge,
         Tool::Text,
         Tool::Blur,
         Tool::Highlight,
@@ -55,6 +58,7 @@ impl Tool {
             Tool::Rect => t("Rectangle"),
             Tool::Ellipse => t("Ellipse"),
             Tool::Line => t("Line"),
+            Tool::Badge => t("Number"),
             Tool::Text => t("Text"),
             Tool::Blur => t("Blur"),
             Tool::Highlight => t("Paint"),
@@ -64,7 +68,7 @@ impl Tool {
 
     /// Text is placed with a click; the rest are dragged out.
     pub fn is_point_tool(self) -> bool {
-        self == Tool::Text
+        matches!(self, Tool::Text | Tool::Badge)
     }
 
     /// Whether line thickness means anything for this tool. Paint and Blur
@@ -104,12 +108,20 @@ pub struct Layer {
     pub cover: Cover,
     pub underline: bool,
     pub align: TextAlign,
+    /// Whether a paint block is an oval rather than a rectangle.
+    #[serde(default)]
+    pub oval: bool,
     /// White rim around the shape, in original screenshot pixels. 0 is none.
     ///
     /// The reason it exists is legibility, not decoration: a red arrow over a
     /// red part of the picture disappears without it. Off by default for
     /// everything except the arrow, which is the tool most often dropped on top
     /// of whatever happens to be there.
+    /// The stroke a freehand mark was drawn along, in original screenshot
+    /// pixels. Empty for every other tool — this is the one shape that is not
+    /// two corners, and everything that reads geometry has to say so.
+    #[serde(default)]
+    pub path: Vec<[f32; 2]>,
     pub border: f32,
     pub border_color: Rgba8,
     /// How far the shadow feathers out, in original screenshot pixels.
@@ -152,8 +164,11 @@ impl ArrowForm {
 /// What sits at the far end of an arrow.
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Debug, Default)]
 pub enum Head {
-    /// A filled triangle, wider than the shaft. The mark a marker pen makes.
+    /// Nothing at the end. The tool draws a line; the head is what makes it
+    /// point at something, and not every line wants to.
     #[default]
+    None,
+    /// A filled triangle, wider than the shaft.
     Solid,
     /// Two barbs swept back from the tip, the width of the shaft.
     Open,
@@ -208,6 +223,8 @@ impl Layer {
             cover: Cover::default(),
             underline: false,
             align: TextAlign::default(),
+            oval: false,
+            path: Vec::new(),
             border: 0.0,
             border_color: [255, 255, 255, 255],
             shadow: 0.0,
@@ -222,11 +239,15 @@ impl Layer {
 
     /// The point a rotation turns about.
     pub fn centre(&self) -> [f32; 2] {
+        if !self.path.is_empty() {
+            let [x0, y0, x1, y1] = self.bounds();
+            return [(x0 + x1) / 2.0, (y0 + y1) / 2.0];
+        }
         match self.kind {
             // A label grows right and down from where it was placed, and its
             // width is not in the struct, so its own origin is the only anchor
             // both the renderer and the editor can agree on without measuring.
-            Tool::Text => self.a,
+            Tool::Text | Tool::Badge => self.a,
             _ => [(self.a[0] + self.b[0]) / 2.0, (self.a[1] + self.b[1]) / 2.0],
         }
     }
@@ -254,8 +275,21 @@ impl Layer {
     pub fn bounds(&self) -> [f32; 4] {
         let pad = match self.kind {
             Tool::Text => self.font_size,
+            Tool::Badge => self.font_size * 1.4,
             _ => self.stroke * 3.0,
         };
+        // A freehand mark is a path, not two corners: its own extent is the
+        // only honest answer, and `b` never moved from `a`.
+        if !self.path.is_empty() {
+            let mut bb = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
+            for p in &self.path {
+                bb[0] = bb[0].min(p[0]);
+                bb[1] = bb[1].min(p[1]);
+                bb[2] = bb[2].max(p[0]);
+                bb[3] = bb[3].max(p[1]);
+            }
+            return [bb[0] - pad, bb[1] - pad, bb[2] + pad, bb[3] + pad];
+        }
         let (x0, x1) = min_max(self.a[0], self.b[0]);
         let (y0, y1) = min_max(self.a[1], self.b[1]);
         [x0 - pad, y0 - pad, x1 + pad, y1 + pad]
@@ -272,13 +306,21 @@ impl Layer {
         self.a[1] += dy;
         self.b[0] += dx;
         self.b[1] += dy;
+        for p in &mut self.path {
+            p[0] += dx;
+            p[1] += dy;
+        }
     }
 
     /// A drag that never moved is a stray click, not a shape — except for text,
     /// which is placed by clicking.
     pub fn is_degenerate(&self) -> bool {
+        if !self.path.is_empty() {
+            return self.path.len() < 2;
+        }
         match self.kind {
             Tool::Text => self.text.trim().is_empty(),
+            Tool::Badge => false,
             _ => (self.a[0] - self.b[0]).abs() < 3.0 && (self.a[1] - self.b[1]).abs() < 3.0,
         }
     }
@@ -288,17 +330,28 @@ fn min_max(a: f32, b: f32) -> (f32, f32) {
     if a <= b { (a, b) } else { (b, a) }
 }
 
-/// Draw every layer onto `img`. `scale` maps original screenshot pixels onto
-/// `img` pixels (1.0 for export, the preview factor for the preview).
-pub fn apply(img: &mut RgbaImage, layers: &[Layer], scale: f32, font: Option<&FontArc>) {
+/// Draw every layer onto `img`.
+///
+/// `scale` maps original screenshot pixels onto `img` pixels and `origin` is
+/// where the screenshot's own top-left landed there. Layers are stored in shot
+/// pixels but drawn onto the finished canvas, so a mark can sit out on the
+/// background and still follow the picture when the layout changes.
+pub fn apply(
+    img: &mut RgbaImage,
+    layers: &[Layer],
+    scale: f32,
+    origin: [f32; 2],
+    font: Option<&FontArc>,
+) {
+    let place = |p: [f32; 2]| [p[0] * scale + origin[0], p[1] * scale + origin[1]];
     for layer in layers {
-        let a = [layer.a[0] * scale, layer.a[1] * scale];
-        let b = [layer.b[0] * scale, layer.b[1] * scale];
+        let a = place(layer.a);
+        let b = place(layer.b);
         let stroke = (layer.stroke * scale).max(1.0);
         let c = layer.centre();
         let turn = Turn {
             angle: layer.angle,
-            centre: [c[0] * scale, c[1] * scale],
+            centre: place(c),
         };
         let ink = Ink {
             color: layer.color,
@@ -315,16 +368,25 @@ pub fn apply(img: &mut RgbaImage, layers: &[Layer], scale: f32, font: Option<&Fo
                 // Built in shot pixels and scaled here, so the outline is the
                 // same shape at preview size and at export size — the arrow's
                 // proportions are the whole point of it.
-                let pts: Vec<[f32; 2]> = arrow_points(layer)
-                    .into_iter()
-                    .map(|p| [p[0] * scale, p[1] * scale])
-                    .collect();
+                let pts: Vec<[f32; 2]> = arrow_points(layer).into_iter().map(place).collect();
                 draw_arrow(img, &pts, &ink);
             }
             Tool::Rect => draw_rect(img, a, b, &ink),
             Tool::Ellipse => draw_ellipse(img, a, b, &ink),
             Tool::Line => draw_line(img, a, b, &ink, layer.head, scale),
-            Tool::Highlight => draw_paint(img, a, b, layer.color, turn),
+            Tool::Highlight => {
+                if layer.path.is_empty() {
+                    draw_paint(img, a, b, layer.color, turn, layer.oval)
+                } else {
+                    let path: Vec<[f32; 2]> = layer.path.iter().copied().map(place).collect();
+                    draw_freehand(img, &path, &ink);
+                }
+            }
+            Tool::Badge => {
+                if let Some(font) = font {
+                    draw_badge(img, a, (layer.font_size * scale).max(8.0), &ink, font, &layer.text);
+                }
+            }
             Tool::Fill => draw_fill(img, a, b, layer.color),
             Tool::Blur => {
                 let amount = (layer.blur * scale).max(1.0);
@@ -566,8 +628,13 @@ fn rasterise(
 /// transcription error waiting in them, and the straight arrow is just the one
 /// with no bend.
 fn arrow_outline(form: ArrowForm) -> Vec<[f32; 2]> {
-    /// Half the shaft's width.
-    const SHAFT: f32 = 0.055;
+    /// Half the shaft's width at the tail, and where it meets the head.
+    ///
+    /// It tapers: a shaft of one width reads as a technical arrow, and this
+    /// tool is meant to be the mark a marker pen leaves — those get thicker as
+    /// the hand bears down towards the point.
+    const TAIL: f32 = 0.030;
+    const NECK: f32 = 0.078;
     /// Half the head's width, at its base.
     const HEAD_HALF: f32 = 0.17;
     /// How much of the arrow's length the head takes.
@@ -607,11 +674,23 @@ fn arrow_outline(form: ArrowForm) -> Vec<[f32; 2]> {
         [-dy / len, dx / len]
     };
 
+    // Widening evenly from tail to neck. Both walls use the same figure, so
+    // point `i` still pairs with `n-1-i` and the outline stays a strip of
+    // quads — which is what the vector stand-in leans on.
+    let half = |i: usize| {
+        let t = if neck == 0 {
+            1.0
+        } else {
+            i as f32 / neck as f32
+        };
+        TAIL + (NECK - TAIL) * t
+    };
+
     let mut out = Vec::with_capacity(neck * 2 + 5);
     // Up one side of the shaft…
     for (i, p) in pts.iter().enumerate().take(neck + 1) {
         let n = normal(i);
-        out.push([p[0] + n[0] * SHAFT, p[1] + n[1] * SHAFT]);
+        out.push([p[0] + n[0] * half(i), p[1] + n[1] * half(i)]);
     }
     // …round the head…
     let n = normal(neck);
@@ -627,9 +706,16 @@ fn arrow_outline(form: ArrowForm) -> Vec<[f32; 2]> {
     // …and back down the other side, so the two walks pair up point for point.
     for (i, p) in pts.iter().enumerate().take(neck + 1).rev() {
         let n = normal(i);
-        out.push([p[0] - n[0] * SHAFT, p[1] - n[1] * SHAFT]);
+        out.push([p[0] - n[0] * half(i), p[1] - n[1] * half(i)]);
     }
     out
+}
+
+/// The arrow's silhouette in its own unit frame, for anything that needs the
+/// shape without a layer to hang it on — the tool button's icon, which has to
+/// be the same figure the tool draws or it promises the wrong one.
+pub fn arrow_shape(form: ArrowForm) -> Vec<[f32; 2]> {
+    arrow_outline(form)
 }
 
 /// The arrow's outline placed in the picture: `a` is the tail, `b` the tip.
@@ -731,7 +817,7 @@ fn draw_line(img: &mut RgbaImage, a: [f32; 2], b: [f32; 2], ink: &Ink, head: Hea
     // the head's back edge; otherwise its round cap pokes past the point.
     let neck = [(l[0] + r[0]) / 2.0, (l[1] + r[1]) / 2.0];
     let shaft: Vec<([f32; 2], [f32; 2])> = match head {
-        Head::Open => vec![(a, b)],
+        Head::None | Head::Open => vec![(a, b)],
         Head::Solid => vec![(a, neck)],
         Head::Dashed => dashes(a, neck, stroke * 2.0),
     };
@@ -746,6 +832,7 @@ fn draw_line(img: &mut RgbaImage, a: [f32; 2], b: [f32; 2], ink: &Ink, head: Hea
                 d = d.min(sd_segment(px, py, *from, *to));
             }
             match head {
+                Head::None => d,
                 // The barbs are strokes like the shaft, so they join it with
                 // the same round cap and the whole mark is one silhouette.
                 Head::Open => d
@@ -758,6 +845,71 @@ fn draw_line(img: &mut RgbaImage, a: [f32; 2], b: [f32; 2], ink: &Ink, head: Hea
         },
         stroke / 2.0,
     );
+}
+
+/// A stroke drawn along a path, as the union of one capsule per segment.
+///
+/// The same trick the dashed shaft uses, and for the same reason: a distance
+/// field made of segments is round at every end and every joint for free, which
+/// is exactly what a pen leaves behind.
+fn draw_freehand(img: &mut RgbaImage, path: &[[f32; 2]], ink: &Ink) {
+    if path.len() < 2 {
+        return;
+    }
+    let pad = ink.stroke + ink.border + 2.0;
+    let mut bb = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
+    for p in path {
+        bb[0] = bb[0].min(p[0]);
+        bb[1] = bb[1].min(p[1]);
+        bb[2] = bb[2].max(p[0]);
+        bb[3] = bb[3].max(p[1]);
+    }
+    rasterise_turned(
+        img,
+        [bb[0] - pad, bb[1] - pad, bb[2] + pad, bb[3] + pad],
+        ink,
+        |px, py| {
+            let mut d = f32::MAX;
+            for pair in path.windows(2) {
+                d = d.min(sd_segment(px, py, pair[0], pair[1]));
+            }
+            d
+        },
+        ink.stroke / 2.0,
+    );
+}
+
+/// A numbered disc.
+///
+/// The number lives on the layer rather than in a counter beside it, so undoing
+/// one badge cannot make the next skip a number — the editor works out what is
+/// free by looking at what is already there.
+fn draw_badge(img: &mut RgbaImage, at: [f32; 2], radius: f32, ink: &Ink, font: &FontArc, n: &str) {
+    rasterise_turned(
+        img,
+        [
+            at[0] - radius,
+            at[1] - radius,
+            at[0] + radius,
+            at[1] + radius,
+        ],
+        ink,
+        |px, py| {
+            let (dx, dy) = (px - at[0], py - at[1]);
+            (dx * dx + dy * dy).sqrt() - radius
+        },
+        0.0,
+    );
+    // The figure, in whatever reads against the disc it sits on.
+    let em = radius * 1.2;
+    let w = text::measure(font, em, n);
+    let on_dark = luminance([ink.color[0], ink.color[1], ink.color[2], 255]) < 0.55;
+    let figure = if on_dark {
+        Rgba([255, 255, 255, 255])
+    } else {
+        Rgba([20, 20, 20, 255])
+    };
+    text::draw(img, font, em, at[0] - w / 2.0, at[1] - em * 0.62, figure, n);
 }
 
 /// A dashed line as a list of segments, `gap` long and `gap` apart./// A dashed line as a list of segments, `gap` long and `gap` apart.
@@ -845,6 +997,7 @@ fn draw_paint(
     b: [f32; 2],
     color: Rgba8,
     turn: Turn,
+    oval: bool,
 ) {
     // Paint blends rather than stamping a distance field, so it cannot borrow
     // `rasterise_turned`. Same idea though: sweep the box the tilted region
@@ -889,13 +1042,24 @@ fn draw_paint(
 
     let (usin, ucos) = (-angle).sin_cos();
     let strength = color[3] as f32 / 255.0;
+    // The oval is measured in the same upright frame as the rectangle, so the
+    // two forms differ by one membership test and nothing else.
+    let (cx, cy) = ((rx0 + rx1) / 2.0, (ry0 + ry1) / 2.0);
+    let (hw, hh) = (((rx1 - rx0) / 2.0).max(0.5), ((ry1 - ry0) / 2.0).max(0.5));
     for y in y0..y1 {
         for x in x0..x1 {
+            let (mut ux, mut uy) = (x as f32 + 0.5, y as f32 + 0.5);
             if turned {
-                let (dx, dy) = (x as f32 + 0.5 - centre[0], y as f32 + 0.5 - centre[1]);
-                let ux = centre[0] + dx * ucos - dy * usin;
-                let uy = centre[1] + dx * usin + dy * ucos;
+                let (dx, dy) = (ux - centre[0], uy - centre[1]);
+                ux = centre[0] + dx * ucos - dy * usin;
+                uy = centre[1] + dx * usin + dy * ucos;
                 if ux < rx0 || ux >= rx1 || uy < ry0 || uy >= ry1 {
+                    continue;
+                }
+            }
+            if oval {
+                let (nx, ny) = ((ux - cx) / hw, (uy - cy) / hh);
+                if nx * nx + ny * ny > 1.0 {
                     continue;
                 }
             }
@@ -1204,7 +1368,7 @@ mod tests {
         let mut shot = before.clone();
         let mut cover = Layer::new(Tool::Fill, [40.0, 40.0], [0, 0, 0, 255], 1.0, 12.0, 1.0);
         cover.b = [100.0, 80.0];
-        apply(&mut shot, &[cover], 1.0, None);
+        apply(&mut shot, &[cover], 1.0, [0.0, 0.0], None);
 
         assert_eq!(
             shot.dimensions(),
@@ -1231,8 +1395,8 @@ mod tests {
         for kind in [Tool::Rect, Tool::Ellipse, Tool::Line] {
             let mut upright = canvas();
             let mut turned = canvas();
-            apply(&mut upright, &[shape(kind, 0.0)], 1.0, None);
-            apply(&mut turned, &[shape(kind, std::f32::consts::FRAC_PI_2)], 1.0, None);
+            apply(&mut upright, &[shape(kind, 0.0)], 1.0, [0.0, 0.0], None);
+            apply(&mut turned, &[shape(kind, std::f32::consts::FRAC_PI_2)], 1.0, [0.0, 0.0], None);
 
             let (u, t) = (ink(&upright), ink(&turned));
             assert!(!u.is_empty() && !t.is_empty(), "{kind:?} drew nothing at all");
@@ -1275,7 +1439,7 @@ mod tests {
                     let mut img = RgbaImage::from_pixel(120, 90, Rgba([0, 0, 0, 255]));
                     let mut l = shape(kind, angle);
                     l.text = "xin chào".to_owned();
-                    apply(&mut img, &[l], scale, font.as_ref());
+                    apply(&mut img, &[l], scale, [0.0, 0.0], font.as_ref());
                 }
             }
         }
@@ -1299,7 +1463,7 @@ mod tests {
             let mut l = Layer::new(Tool::Text, at, [255, 0, 0, 255], 2.0, 20.0, 8.0);
             l.text = "anchor".to_owned();
             l.angle = angle;
-            apply(&mut img, &[l], 1.0, Some(&font));
+            apply(&mut img, &[l], 1.0, [0.0, 0.0], Some(&font));
 
             let lit = ink(&img);
             assert!(!lit.is_empty(), "nothing drawn at {angle:.2} rad");
@@ -1328,7 +1492,10 @@ mod tests {
             let mut img = RgbaImage::from_pixel(side, side, Rgba([0, 0, 0, 0]));
             let mut l = Layer::new(Tool::Line, [10.0, 100.0], [255, 0, 0, 255], 1.0, 20.0, 8.0);
             l.b = [190.0, 100.0];
-            apply(&mut img, &[l], scale, None);
+            // The default is now no head at all: the tool draws a line, and
+            // the head is what makes it point at something.
+            l.head = Head::Solid;
+            apply(&mut img, &[l], scale, [0.0, 0.0], None);
             let lit = ink(&img);
             let ys: Vec<u32> = lit.iter().map(|p| p.1).collect();
             // A horizontal arrow is one pixel tall but for its head, so the
@@ -1357,7 +1524,7 @@ mod tests {
                 let mut img = RgbaImage::from_pixel(100, 100, Rgba([0, 0, 0, 255]));
                 let mut l = layer(kind, [20.0, 20.0], [80.0, 80.0]);
                 l.filled = filled;
-                apply(&mut img, &[l], 1.0, None);
+                apply(&mut img, &[l], 1.0, [0.0, 0.0], None);
                 img.get_pixel(50, 50).0
             };
             assert_eq!(
@@ -1382,7 +1549,7 @@ mod tests {
             let mut l = layer(Tool::Rect, [20.0, 20.0], [80.0, 80.0]);
             l.stroke = 3.0;
             l.corner = r;
-            apply(&mut img, &[l], 1.0, None);
+            apply(&mut img, &[l], 1.0, [0.0, 0.0], None);
             img.get_pixel(21, 21).0 != [0, 0, 0, 255]
         };
         assert!(corner_ink(0.0), "a sharp rectangle missed its own corner");
@@ -1415,16 +1582,21 @@ mod tests {
             let mut l = layer(Tool::Line, [10.0, 30.0], [130.0, 30.0]);
             l.stroke = 4.0;
             l.head = head;
-            apply(&mut img, &[l], 1.0, None);
+            apply(&mut img, &[l], 1.0, [0.0, 0.0], None);
             img
         };
         let lit = |img: &RgbaImage| ink(img);
-        let (solid, open, dashed) = (
+        let (solid, open, dashed, bare) = (
             render(Head::Solid),
             render(Head::Open),
             render(Head::Dashed),
+            render(Head::None),
         );
         assert!(!lit(&solid).is_empty(), "the solid head drew nothing");
+        assert!(
+            lit(&bare).len() < lit(&solid).len(),
+            "a headless line covers as much as one with a head on it"
+        );
         assert_ne!(lit(&solid), lit(&open), "solid and open are the same mark");
         assert_ne!(lit(&dashed), lit(&solid), "dashed and solid are the same mark");
 
@@ -1465,7 +1637,7 @@ mod tests {
         let mut l = layer(Tool::Blur, [8.0, 8.0], [32.0, 32.0]);
         l.cover = Cover::Pixelate;
         l.blur = 8.0;
-        apply(&mut img, &[l], 1.0, None);
+        apply(&mut img, &[l], 1.0, [0.0, 0.0], None);
 
         let a = img.get_pixel(12, 12).0;
         let b = img.get_pixel(13, 13).0;
@@ -1493,7 +1665,7 @@ mod tests {
             let mut l = Layer::new(Tool::Text, [150.0, 20.0], [255, 0, 0, 255], 2.0, 24.0, 8.0);
             l.text = "anchored".to_owned();
             l.align = align;
-            apply(&mut img, &[l], 1.0, Some(&font));
+            apply(&mut img, &[l], 1.0, [0.0, 0.0], Some(&font));
             let lit = ink(&img);
             (
                 lit.iter().map(|p| p.0).min().unwrap_or(0),
@@ -1522,7 +1694,7 @@ mod tests {
             let mut l = Layer::new(Tool::Text, [10.0, 10.0], [255, 0, 0, 255], 2.0, 24.0, 8.0);
             l.text = "ruled".to_owned();
             l.underline = underline;
-            apply(&mut img, &[l], 1.0, Some(&font));
+            apply(&mut img, &[l], 1.0, [0.0, 0.0], Some(&font));
             ink(&img).iter().map(|p| p.1).max().unwrap_or(0)
         };
         assert!(
@@ -1554,6 +1726,31 @@ mod tests {
              is {long:.3} — the shape is being stretched, not scaled"
         );
         assert!(short > 0.2 && short < 0.5, "the head is a strange width: {short}");
+    }
+
+    /// The shaft widens towards the head. A shaft of one width reads as a
+    /// technical arrow; this tool is the mark a marker pen leaves.
+    #[test]
+    fn the_arrows_shaft_is_thinner_at_the_tail_than_at_the_head() {
+        let mut l = layer(Tool::Arrow, [0.0, 100.0], [300.0, 100.0]);
+        l.arrow = ArrowForm::Straight;
+        let pts = arrow_points(&l);
+        let n = pts.len();
+        // Point `i` on one wall pairs with `n-1-i` on the other, so the gap
+        // between them is the shaft's full width at that point along it.
+        let width = |i: usize| (pts[i][1] - pts[n - 1 - i][1]).abs();
+        let tail = width(0);
+        let neck = width(n / 2 - 3);
+        assert!(
+            neck > tail * 1.6,
+            "the shaft is {tail:.1} wide at the tail and {neck:.1} at the head — \
+             it is not tapering"
+        );
+        assert!(
+            neck < tail * 4.0,
+            "the taper is {:.1}x, which is a wedge rather than an arrow",
+            neck / tail
+        );
     }
 
     /// The three forms have to be three different silhouettes, and the bent
@@ -1603,6 +1800,71 @@ mod tests {
         assert!(sd_polygon(150.0, 100.0, &pts) < 0.0, "the head is hollow");
     }
 
+    /// A freehand mark is a path, not two corners, and everything that reads a
+    /// layer's geometry has to know that. `b` never moves off `a`, so a bounds
+    /// taken from the corners would be a dot wherever the stroke started.
+    #[test]
+    fn a_freehand_mark_is_measured_by_its_path() {
+        let mut l = layer(Tool::Highlight, [50.0, 50.0], [50.0, 50.0]);
+        l.stroke = 4.0;
+        l.path = vec![[50.0, 50.0], [90.0, 60.0], [70.0, 95.0]];
+        let [x0, y0, x1, y1] = l.bounds();
+        assert!(x1 - x0 > 30.0 && y1 - y0 > 35.0, "the bounds ignored the path");
+        assert!(x0 < 50.0 && y0 < 50.0, "the bounds do not contain the start");
+
+        // And it has to *draw* along that path, not sit in a corner.
+        let mut img = RgbaImage::from_pixel(140, 140, Rgba([0, 0, 0, 0]));
+        apply(&mut img, &[l.clone()], 1.0, [0.0, 0.0], None);
+        let lit = ink(&img);
+        assert!(!lit.is_empty(), "the freehand mark drew nothing");
+        let far = lit.iter().any(|p| p.1 > 88);
+        assert!(far, "the stroke stopped short of the last point on its path");
+
+        // Moving it has to take the path with it, or the mark and its own
+        // bounds part company the first time it is dragged.
+        let before = l.bounds();
+        l.translate(10.0, 20.0);
+        let after = l.bounds();
+        assert!(
+            (after[0] - before[0] - 10.0).abs() < 0.01
+                && (after[1] - before[1] - 20.0).abs() < 0.01,
+            "the path stayed behind when the layer moved"
+        );
+    }
+
+    /// The badge's number lives on the layer. A counter kept beside the layers
+    /// would skip after an undo, which is the sort of thing a reader notices
+    /// and an author does not.
+    #[test]
+    fn a_badge_draws_the_number_it_carries() {
+        let Some((_, font)) = crate::render::text::load_system_font() else {
+            return;
+        };
+        let mark = |n: &str| {
+            let mut img = RgbaImage::from_pixel(80, 80, Rgba([0, 0, 0, 0]));
+            let mut l = Layer::new(Tool::Badge, [40.0, 40.0], [255, 0, 0, 255], 2.0, 18.0, 8.0);
+            l.text = n.to_owned();
+            apply(&mut img, &[l], 1.0, [0.0, 0.0], Some(&font));
+            img
+        };
+        let one = mark("1");
+        let eight = mark("8");
+        assert!(!ink(&one).is_empty(), "the badge drew nothing at all");
+
+        // Compared by *colour*, not by coverage: the figure sits on top of an
+        // opaque disc, so every number leaves the same alpha mask and an
+        // alpha-only check would pass without a figure being drawn at all.
+        let differs = (0..80)
+            .flat_map(|y| (0..80).map(move |x| (x, y)))
+            .any(|(x, y)| one.get_pixel(x, y).0 != eight.get_pixel(x, y).0);
+        assert!(differs, "every number draws the same badge");
+
+        // And the figure has to be legible against the disc it sits on.
+        let disc = one.get_pixel(40, 22).0;
+        let centre = one.get_pixel(40, 40).0;
+        assert_ne!(centre, disc, "the middle of the badge has no figure on it");
+    }
+
     /// The rim exists so a red arrow on a red picture can still be seen. This
     /// is the assertion that it lands *outside* the ink rather than eating into
     /// it — a rim drawn inside would thin the shape instead of ringing it.
@@ -1615,7 +1877,7 @@ mod tests {
             l.filled = true;
             l.border = border;
             l.border_color = [255, 255, 255, 255];
-            apply(&mut img, &[l], 1.0, None);
+            apply(&mut img, &[l], 1.0, [0.0, 0.0], None);
             img
         };
         let bare = draw(0.0);
@@ -1646,7 +1908,7 @@ mod tests {
         l.stroke = 4.0;
         l.filled = true;
         l.shadow = 10.0;
-        apply(&mut img, &[l], 1.0, None);
+        apply(&mut img, &[l], 1.0, [0.0, 0.0], None);
 
         // The shape's own edge is at y = 60 + half the stroke, and the shadow
         // reaches ten past that with a 3.5px drop, so all three samples sit
@@ -1676,8 +1938,8 @@ mod tests {
 
         let mut square = canvas();
         let mut asked = canvas();
-        apply(&mut square, &[shape(Tool::Fill, 0.0)], 1.0, None);
-        apply(&mut asked, &[shape(Tool::Fill, 0.9)], 1.0, None);
+        apply(&mut square, &[shape(Tool::Fill, 0.0)], 1.0, [0.0, 0.0], None);
+        apply(&mut asked, &[shape(Tool::Fill, 0.9)], 1.0, [0.0, 0.0], None);
         assert_eq!(
             ink(&square),
             ink(&asked),
@@ -1763,7 +2025,7 @@ mod tests {
     fn drawing_marks_the_image_and_respects_scale() {
         let mut img = RgbaImage::from_pixel(100, 100, Rgba([255, 255, 255, 255]));
         let layers = vec![layer(Tool::Rect, [10.0, 10.0], [50.0, 50.0])];
-        apply(&mut img, &layers, 1.0, None);
+        apply(&mut img, &layers, 1.0, [0.0, 0.0], None);
         // The rect edge runs through x=10, y=30. Check green, not red: the ink
         // is pure red on white, so the red channel stays 255 either way.
         assert_ne!(img.get_pixel(10, 30).0[1], 255, "edge was not drawn");
@@ -1776,8 +2038,8 @@ mod tests {
         let mut full = RgbaImage::from_pixel(100, 100, Rgba([255, 255, 255, 255]));
         let mut half = RgbaImage::from_pixel(100, 100, Rgba([255, 255, 255, 255]));
         let layers = vec![layer(Tool::Rect, [40.0, 40.0], [80.0, 80.0])];
-        apply(&mut full, &layers, 1.0, None);
-        apply(&mut half, &layers, 0.5, None);
+        apply(&mut full, &layers, 1.0, [0.0, 0.0], None);
+        apply(&mut half, &layers, 0.5, [0.0, 0.0], None);
         assert_ne!(full.get_pixel(40, 60).0[1], 255, "full-scale edge missing");
         assert_ne!(half.get_pixel(20, 30).0[1], 255, "half-scale edge missing");
         assert_eq!(
@@ -1796,7 +2058,7 @@ mod tests {
             layer(Tool::Highlight, [30.0, 30.0], [900.0, 900.0]),
             layer(Tool::Ellipse, [-10.0, -10.0], [10.0, 10.0]),
         ];
-        apply(&mut img, &layers, 1.0, None);
+        apply(&mut img, &layers, 1.0, [0.0, 0.0], None);
     }
 
     #[test]
@@ -1884,7 +2146,7 @@ mod tests {
         let mut img = RgbaImage::from_pixel(20, 20, Rgba(bg));
         let mut l = layer(Tool::Highlight, [2.0, 2.0], [18.0, 18.0]);
         l.color = [ink[0], ink[1], ink[2], alpha];
-        apply(&mut img, &[l], 1.0, None);
+        apply(&mut img, &[l], 1.0, [0.0, 0.0], None);
         img.get_pixel(10, 10).0
     }
 
@@ -1925,7 +2187,7 @@ mod tests {
         img.put_pixel(5, 5, Rgba([255, 255, 255, 255])); // a word
         let mut l = layer(Tool::Highlight, [0.0, 0.0], [10.0, 10.0]);
         l.color = [YELLOW[0], YELLOW[1], YELLOW[2], 128];
-        apply(&mut img, &[l], 1.0, None);
+        apply(&mut img, &[l], 1.0, [0.0, 0.0], None);
 
         let text = luminance(img.get_pixel(5, 5).0);
         let back = luminance(img.get_pixel(1, 1).0);
@@ -1972,7 +2234,7 @@ mod tests {
             let mut img = RgbaImage::from_pixel(20, 20, Rgba(LIGHT));
             let mut l = layer(Tool::Fill, [2.0, 2.0], [18.0, 18.0]);
             l.color = [0, 0, 0, 255];
-            apply(&mut img, &[l], 1.0, None);
+            apply(&mut img, &[l], 1.0, [0.0, 0.0], None);
             img.get_pixel(10, 10).0
         };
         assert_eq!(out, [0, 0, 0, 255], "redaction must still cover outright");

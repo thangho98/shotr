@@ -17,7 +17,7 @@ use eframe::egui;
 use image::{Rgba, RgbaImage};
 use std::path::PathBuf;
 
-use crate::annotate::{self, Layer, Tool};
+use crate::annotate::{self, ArrowForm, Cover, Layer, Tool};
 use crate::capture::make_preview;
 use crate::export;
 use crate::history;
@@ -266,6 +266,9 @@ pub struct ShotrApp {
     pub(crate) draft: Option<Layer>,
     pub(crate) move_delta: Option<[f32; 2]>,
     pub(crate) drag_anchor: Option<[f32; 2]>,
+    /// A drag on the arrow's tail handle, which sets its size and direction at
+    /// once.
+    pub(crate) tail_drag: bool,
     pub(crate) annot_color: Rgba8,
     pub(crate) annot_stroke: f32,
     pub(crate) annot_font_size: f32,
@@ -279,6 +282,9 @@ pub struct ShotrApp {
     pub(crate) annot_corner: f32,
     pub(crate) annot_head: crate::annotate::Head,
     pub(crate) annot_arrow: crate::annotate::ArrowForm,
+    pub(crate) annot_paint: PaintForm,
+    /// Where each tool button was left, so returning to it costs one press.
+    pub(crate) group_stop: [usize; GROUPS.len()],
     pub(crate) annot_cover: crate::annotate::Cover,
     pub(crate) annot_underline: bool,
     pub(crate) annot_align: crate::annotate::TextAlign,
@@ -434,6 +440,7 @@ impl ShotrApp {
             draft: None,
             move_delta: None,
             drag_anchor: None,
+            tail_drag: false,
             annot_color: [0xff, 0x5a, 0x5a, 0xff],
             annot_stroke: 6.0,
             annot_font_size: 34.0,
@@ -441,8 +448,10 @@ impl ShotrApp {
             annot_paint_alpha: 255,
             annot_filled: false,
             annot_corner: 0.0,
-            annot_head: crate::annotate::Head::Solid,
+            annot_head: crate::annotate::Head::None,
             annot_arrow: crate::annotate::ArrowForm::Straight,
+            annot_paint: PaintForm::Block,
+            group_stop: [0; GROUPS.len()],
             annot_cover: crate::annotate::Cover::Blur,
             annot_underline: false,
             annot_align: crate::annotate::TextAlign::Left,
@@ -699,6 +708,81 @@ impl ShotrApp {
         }
     }
 
+    /// Whether the paint tool is laying down a stroke rather than a block.
+    pub(crate) fn freehand(&self) -> bool {
+        self.tool == Tool::Highlight && self.annot_paint == PaintForm::Freehand
+    }
+
+    /// The number the next badge should carry.
+    ///
+    /// Worked out from the badges already on the picture rather than kept in a
+    /// counter beside them, so undoing one does not make the next skip — and
+    /// deleting the third of five leaves the gap where the reader can see it,
+    /// which is the honest answer.
+    pub(crate) fn next_badge(&self) -> u32 {
+        self.layers
+            .iter()
+            .filter(|l| l.kind == Tool::Badge)
+            .filter_map(|l| l.text.parse::<u32>().ok())
+            .max()
+            .unwrap_or(0)
+            + 1
+    }
+
+    /// One of the four label presets, in shot pixels.
+    pub(crate) fn text_size(&self, i: usize) -> f32 {
+        let height = self.shot_full.height().max(1) as f32;
+        (height * TEXT_SIZES[i.min(TEXT_SIZES.len() - 1)]).round().max(8.0)
+    }
+
+    /// Which tool's controls the options row should show.
+    ///
+    /// With a shape selected, it is that shape's — so picking a red rectangle
+    /// puts the rectangle's own dials in the row, set to *its* values. The
+    /// alternative is a row that reads "green" over a red shape and jumps it to
+    /// green the moment anything is nudged.
+    pub(crate) fn options_kind(&self) -> Tool {
+        if self.tool == Tool::Select
+            && let Some(l) = self.selected_layer.and_then(|i| self.layers.get(i))
+        {
+            return l.kind;
+        }
+        self.tool
+    }
+
+    /// Load a shape's own settings into the dials, so the row describes what is
+    /// selected rather than what would be drawn next.
+    pub(crate) fn load_dials_from(&mut self, i: usize) {
+        let Some(l) = self.layers.get(i) else { return };
+        self.annot_color = l.color;
+        self.annot_stroke = l.stroke;
+        self.annot_font_size = l.font_size;
+        self.annot_blur = l.blur;
+        self.annot_filled = l.filled;
+        self.annot_corner = l.corner;
+        self.annot_head = l.head;
+        self.annot_arrow = l.arrow;
+        self.annot_cover = l.cover;
+        self.annot_underline = l.underline;
+        self.annot_align = l.align;
+        self.annot_border_color = l.border_color;
+        if l.kind == Tool::Arrow {
+            self.annot_arrow_rim = l.border;
+        } else {
+            self.annot_border = l.border;
+        }
+        if l.kind == Tool::Highlight {
+            self.annot_paint_alpha = l.color[3];
+            self.annot_paint = if !l.path.is_empty() {
+                PaintForm::Freehand
+            } else if l.oval {
+                PaintForm::Oval
+            } else {
+                PaintForm::Block
+            };
+        }
+    }
+
     /// A fresh layer carrying every dial the options row can set.
     ///
     /// One place, because a dial that the row can move but a *new* shape does
@@ -720,6 +804,7 @@ impl ShotrApp {
         layer.cover = self.annot_cover;
         layer.underline = self.annot_underline;
         layer.align = self.annot_align;
+        layer.oval = self.annot_paint == PaintForm::Oval;
         layer.border = if tool == Tool::Arrow {
             self.annot_arrow_rim
         } else {
@@ -787,7 +872,11 @@ impl ShotrApp {
         }
         self.undo.push(&self.layers);
         self.layers.push(layer);
-        self.selected_layer = Some(self.layers.len() - 1);
+        // *Not* selected. Leaving the new shape selected meant the next turn of
+        // any dial silently rewrote it — reported as settings changing a shape
+        // that was never picked. Selection is something you do on purpose, with
+        // the Select tool, and it is the only thing that draws an outline.
+        self.selected_layer = None;
         self.dirty = true;
         true
     }
@@ -1019,7 +1108,7 @@ impl ShotrApp {
         let boxes = self.redaction_layers();
         let mut out = self.shot_full.clone();
         if !boxes.is_empty() {
-            crate::annotate::apply(&mut out, &boxes, 1.0, self.font.as_ref());
+            crate::annotate::apply(&mut out, &boxes, 1.0, [0.0, 0.0], self.font.as_ref());
         }
         match export::copy(&out, &mut self.clipboard) {
             Ok(()) if boxes.is_empty() => self.status = t("Copied the shot as captured").into(),
@@ -1392,6 +1481,155 @@ fn plain_key(events: &[egui::Event], key: egui::Key) -> bool {
     })
 }
 
+/// A tool key, with or without shift. Shift steps *back* through a tool's forms,
+/// so overshooting a four-stop cycle costs one press rather than three.
+fn shifted_key(events: &[egui::Event], key: egui::Key) -> bool {
+    events.iter().any(|e| {
+        matches!(
+            e,
+            egui::Event::Key { key: k, pressed: true, modifiers, .. }
+                if *k == key && !modifiers.command && !modifiers.alt && !modifiers.ctrl
+        )
+    })
+}
+
+/// One button on the tool row: the key it answers to, and the forms it steps
+/// through when pressed again.
+///
+/// A group may span more than one `Tool` — the shape button holds a rectangle,
+/// a rounded rectangle, an ellipse and a line — which is what keeps the row to
+/// seven buttons instead of ten. The button's icon follows whichever stop is in
+/// hand, so it never claims to be a shape it is not.
+pub(crate) const GROUPS: [(char, &[Stop]); 7] = [
+    (
+        '1',
+        &[
+            Stop::Arrow(ArrowForm::Straight),
+            Stop::Arrow(ArrowForm::BendLeft),
+            Stop::Arrow(ArrowForm::BendRight),
+        ],
+    ),
+    (
+        '2',
+        &[Stop::Text(0), Stop::Text(1), Stop::Text(2)],
+    ),
+    (
+        '3',
+        &[
+            Stop::Rect(0.0),
+            Stop::Rect(ROUNDED_CORNER),
+            Stop::Ellipse,
+            Stop::Line,
+        ],
+    ),
+    (
+        '4',
+        &[Stop::Badge(0), Stop::Badge(1), Stop::Badge(2)],
+    ),
+    (
+        '5',
+        &[
+            Stop::Paint(PaintForm::Block),
+            Stop::Paint(PaintForm::Oval),
+            Stop::Paint(PaintForm::Freehand),
+        ],
+    ),
+    (
+        '6',
+        &[Stop::Cover(Cover::Blur), Stop::Cover(Cover::Pixelate)],
+    ),
+    ('`', &[Stop::Select]),
+];
+
+/// The corner the rounded rectangle steps to, in shot pixels.
+const ROUNDED_CORNER: f32 = 12.0;
+
+/// One stop on a tool button's cycle.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(crate) enum Stop {
+    Arrow(ArrowForm),
+    /// An index into [`TEXT_SIZES`].
+    Text(usize),
+    /// A rectangle with this corner radius.
+    Rect(f32),
+    Ellipse,
+    Line,
+    /// A numbered disc at one of the four sizes.
+    Badge(usize),
+    Paint(PaintForm),
+    Cover(Cover),
+    Select,
+}
+
+/// What the paint tool lays down.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum PaintForm {
+    Block,
+    Oval,
+    Freehand,
+}
+
+impl Stop {
+    pub(crate) fn tool(self) -> Tool {
+        match self {
+            Stop::Arrow(_) => Tool::Arrow,
+            Stop::Text(_) => Tool::Text,
+            Stop::Rect(_) => Tool::Rect,
+            Stop::Ellipse => Tool::Ellipse,
+            Stop::Line => Tool::Line,
+            Stop::Badge(_) => Tool::Badge,
+            Stop::Paint(_) => Tool::Highlight,
+            Stop::Cover(_) => Tool::Blur,
+            Stop::Select => Tool::Select,
+        }
+    }
+
+    /// Whether the tool in hand is this stop's, ignoring which form.
+    pub(crate) fn matches_tool_state(self, app: &ShotrApp) -> bool {
+        app.tool == self.tool()
+    }
+
+    /// Whether this stop is the one currently in hand.
+    fn matches(self, app: &ShotrApp) -> bool {
+        if app.tool != self.tool() {
+            return false;
+        }
+        match self {
+            Stop::Arrow(form) => app.annot_arrow == form,
+            // A size typed into the options row matches no preset, which is
+            // right: the next press should start the cycle rather than jump
+            // from wherever the custom value happens to fall.
+            Stop::Text(i) | Stop::Badge(i) => {
+                (app.annot_font_size - app.text_size(i)).abs() < 0.5
+            }
+            Stop::Rect(r) => (app.annot_corner - r).abs() < 0.5,
+            Stop::Paint(form) => app.annot_paint == form,
+            Stop::Cover(cover) => app.annot_cover == cover,
+            Stop::Ellipse | Stop::Line | Stop::Select => true,
+        }
+    }
+
+    fn apply(self, app: &mut ShotrApp) {
+        app.tool = self.tool();
+        match self {
+            Stop::Arrow(form) => app.annot_arrow = form,
+            Stop::Text(i) | Stop::Badge(i) => app.annot_font_size = app.text_size(i),
+            Stop::Rect(r) => app.annot_corner = r,
+            Stop::Paint(form) => app.annot_paint = form,
+            Stop::Cover(cover) => app.annot_cover = cover,
+            Stop::Ellipse | Stop::Line | Stop::Select => {}
+        }
+    }
+}
+
+/// The four label sizes the Text key steps through, as a fraction of the shot's
+/// height.
+///
+/// Relative rather than absolute, because a fixed 34px is legible on a 1280px
+/// shot and a speck on a 3440px one — the same preset has to mean the same
+/// thing on both. The options row still shows and edits pixels.
+const TEXT_SIZES: [f32; 3] = [0.034, 0.052, 0.078];
+
 /// The key that types `label`. The pill prints these on its buttons, so the two
 /// must agree; there is a test that walks the whole list.
 fn tool_key(label: char) -> Option<egui::Key> {
@@ -1416,18 +1654,58 @@ impl ShotrApp {
     /// guards both — because a bare digit is a character before it is a
     /// shortcut, and a label being written must get it.
     fn tool_keys(&mut self, ctx: &egui::Context) {
-        let (picked, escape) = ctx.input(|i| {
-            let picked = shell::TOOLS.iter().find(|(_, key)| {
-                tool_key(*key).is_some_and(|k| plain_key(&i.events, k))
-            });
-            (picked.map(|(tool, _)| *tool), plain_key(&i.events, egui::Key::Escape))
+        let (picked, escape, back) = ctx.input(|i| {
+            let picked = GROUPS
+                .iter()
+                .position(|(key, _)| tool_key(*key).is_some_and(|k| shifted_key(&i.events, k)));
+            (
+                picked,
+                plain_key(&i.events, egui::Key::Escape),
+                i.modifiers.shift,
+            )
         });
-        if let Some(tool) = picked {
-            self.tool = tool;
+        if let Some(group) = picked {
+            self.pick_group(group, back);
         }
         if escape {
             self.tool = Tool::Select;
         }
+    }
+
+    /// Choose a button's tool, or step through its forms if it already has one.
+    ///
+    /// Pressing a key from a *different* button goes to the form last used
+    /// rather than the first — which is what makes a shared key cheap: reaching
+    /// for the ellipse you were just using costs one press, not three.
+    ///
+    /// The ghost is what reports the step, so it is never silent.
+    pub(crate) fn pick_group(&mut self, group: usize, back: bool) {
+        self.finish_text_edit();
+        let Some((_, stops)) = GROUPS.get(group) else {
+            return;
+        };
+        // While the group is in hand the dials are the truth, because the
+        // options row can move them too; the remembered index is only a place
+        // to come back to.
+        let at = stops.iter().position(|s| s.matches(self));
+        let step = match at {
+            Some(at) if back => (at + stops.len() - 1) % stops.len(),
+            Some(at) => (at + 1) % stops.len(),
+            None => self.group_stop[group].min(stops.len() - 1),
+        };
+        self.group_stop[group] = step;
+        stops[step].apply(self);
+    }
+
+    /// The stop a button is showing: the one in hand if this group has it,
+    /// otherwise the one it would return to.
+    pub(crate) fn group_showing(&self, group: usize) -> Stop {
+        let (_, stops) = GROUPS[group];
+        stops
+            .iter()
+            .copied()
+            .find(|s| s.matches(self))
+            .unwrap_or(stops[self.group_stop[group].min(stops.len() - 1)])
     }
 
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
@@ -1599,6 +1877,91 @@ pub(crate) fn to_color_image(img: &RgbaImage) -> egui::ColorImage {
         [img.width() as usize, img.height() as usize],
         img.as_raw(),
     )
+}
+
+#[cfg(test)]
+mod variant_tests {
+    use super::*;
+
+    /// Every stop on a cycle has to be reachable, and stepping has to come back
+    /// round. A cycle that stalls looks like the key having stopped working.
+    #[test]
+    fn stepping_through_a_button_visits_every_form_and_wraps() {
+        for (key, stops) in GROUPS {
+            let n = stops.len();
+            assert!(n > 0, "the {key} button has no forms");
+            for start in 0..n {
+                let mut seen: Vec<usize> = (0..n).map(|k| (start + 1 + k) % n).collect();
+                seen.sort_unstable();
+                seen.dedup();
+                assert_eq!(seen.len(), n, "the {key} button misses a form from {start}");
+            }
+        }
+    }
+
+    /// Shift steps the other way, which is what makes overshooting a four-stop
+    /// cycle cost one press rather than three.
+    #[test]
+    fn shift_steps_back_the_way_a_plain_press_came() {
+        let n = GROUPS[1].1.len();
+        assert_eq!(n, TEXT_SIZES.len(), "the text button lost a size");
+        for at in 0..n {
+            assert_eq!(((at + 1) % n + n - 1) % n, at, "forward then back drifted");
+        }
+    }
+
+    /// A button may hold more than one tool — the shape button holds four — but
+    /// no *other* button may reach a tool that is not its own, or the icon and
+    /// the key would disagree about what a press does.
+    #[test]
+    fn no_two_buttons_offer_the_same_tool() {
+        let mut owners: Vec<(String, char)> = Vec::new();
+        for (key, stops) in GROUPS {
+            let mut mine: Vec<String> = stops.iter().map(|s| format!("{:?}", s.tool())).collect();
+            // Several stops of one button share a tool — three arrows, four
+            // label sizes — which is fine. Two *buttons* sharing one is not.
+            mine.sort();
+            mine.dedup();
+            owners.extend(mine.into_iter().map(|t| (t, key)));
+        }
+        owners.sort();
+        for pair in owners.windows(2) {
+            assert_ne!(
+                pair[0].0, pair[1].0,
+                "{} is reachable from both {} and {}",
+                pair[0].0, pair[0].1, pair[1].1
+            );
+        }
+    }
+
+    /// The presets are a fraction of the shot's height, so "medium" means the
+    /// same thing on a 1280px shot and a 3440px one. A fixed pixel size would
+    /// be legible on one and a speck on the other.
+    #[test]
+    fn the_label_presets_grow_with_the_picture() {
+        assert!(TEXT_SIZES.windows(2).all(|w| w[0] < w[1]), "not in order");
+        const LAST: usize = TEXT_SIZES.len() - 1;
+        const _: () = assert!(TEXT_SIZES[0] > 0.0 && TEXT_SIZES[LAST] < 0.2);
+        // The steps have to be far enough apart to read as different sizes.
+        assert!(
+            TEXT_SIZES.windows(2).all(|w| w[1] / w[0] > 1.3),
+            "two presets are close enough to look like the same size"
+        );
+    }
+
+    /// Every drawable tool has to be reachable from some button, or it is a
+    /// renderer with no way in.
+    #[test]
+    fn every_drawable_tool_has_a_button() {
+        for tool in Tool::DRAWABLE {
+            assert!(
+                GROUPS
+                    .iter()
+                    .any(|(_, stops)| stops.iter().any(|s| s.tool() == tool)),
+                "{tool:?} can be drawn but no button selects it"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1796,10 +2159,11 @@ mod shortcut_tests {
     /// failure that produces no error anywhere.
     #[test]
     fn every_label_printed_on_the_pill_maps_to_a_real_key() {
-        for (tool, label) in super::shell::TOOLS {
+        for (label, stops) in super::GROUPS {
             assert!(
                 super::tool_key(label).is_some(),
-                "{tool:?} prints {label:?} on its button but no key produces it"
+                "{:?} prints {label:?} on its button but no key produces it",
+                stops[0].tool()
             );
         }
     }

@@ -17,31 +17,10 @@ use eframe::egui;
 
 use super::icons::Glyph;
 use super::theme;
-use super::{Mode, SIDEBAR_W, ShotrApp, Zoom, controls};
+use super::{Mode, PaintForm, SIDEBAR_W, ShotrApp, Zoom, controls};
 use crate::annotate::{ArrowForm, Cover, Head, Layer, TextAlign, Tool};
 use crate::export;
 use crate::i18n::{t, tf};
-
-/// The tools the floating pill offers, in order, each with the key that
-/// selects it. Select is last and sits behind a separator: it is the tool you
-/// return to, not one of the six you draw with.
-///
-/// It gets the key *left of* `1` rather than `7` for exactly that reason —
-/// it is reached far more often than any single drawing tool, and `7` is a
-/// stretch from the home position.
-///
-/// One list, used by the pill, by the keyboard handler and by the shortcut
-/// list in Preferences — so a tool cannot gain a button without gaining a key.
-pub(super) const TOOLS: [(Tool, char); 8] = [
-    (Tool::Arrow, '1'),
-    (Tool::Text, '2'),
-    (Tool::Rect, '3'),
-    (Tool::Ellipse, '4'),
-    (Tool::Line, '5'),
-    (Tool::Blur, '6'),
-    (Tool::Highlight, '7'),
-    (Tool::Select, '`'),
-];
 
 const SEP_W: f32 = 1.0;
 /// The options row, and the space around it inside the capsule.
@@ -53,7 +32,8 @@ const HAIRLINE_GAP: f32 = 5.0;
 
 /// The arrow heads, in the order the row offers them. These belong to the line
 /// shape, which is where the old stroked arrow went.
-const HEADS: [(Head, &str); 3] = [
+const HEADS: [(Head, &str); 4] = [
+    (Head::None, "No head"),
     (Head::Solid, "Solid head"),
     (Head::Open, "Open head"),
     (Head::Dashed, "Dashed"),
@@ -66,11 +46,24 @@ const ARROWS: [(ArrowForm, &str); 3] = [
     (ArrowForm::BendRight, "Bend right"),
 ];
 
+/// What the paint tool lays down, in the order the row offers it.
+const PAINTS: [(PaintForm, &str); 3] = [
+    (PaintForm::Block, "Block"),
+    (PaintForm::Oval, "Oval"),
+    (PaintForm::Freehand, "Freehand"),
+];
+
 /// The two ways of hiding what is under a redaction.
 const COVERS: [(Cover, &str); 2] = [(Cover::Blur, "Blur"), (Cover::Pixelate, "Pixelate")];
 
 /// Moving a shape through the stack. `1` is towards the viewer.
-const ORDERING: [(isize, &str); 2] = [(1, "Bring forward"), (-1, "Send back")];
+///
+/// Drawn rather than written: three word-pills took the Select row past the
+/// canvas's width, and a bar that is too wide is not shown at all.
+const ORDERING: [(isize, Glyph, &str); 2] = [
+    (1, Glyph::Forward, "Bring forward"),
+    (-1, Glyph::Back, "Send back"),
+];
 
 /// Clearance the pill needs above the picture, so a shot fitted to the canvas
 /// never slides under it.
@@ -608,7 +601,13 @@ impl ShotrApp {
         // duplicate or delete, and a row of dead buttons is worse than none.
         let open = self.tool != Tool::Select || self.selected_layer.is_some();
 
-        let width = capsule_width(ui, open, self.tool);
+        let width = capsule_width(
+            ui,
+            open,
+            self.options_kind(),
+            self.freehand(),
+            self.tool == Tool::Select && self.selected_layer.is_some(),
+        );
         if width > canvas.width() - 16.0 {
             return;
         }
@@ -652,13 +651,24 @@ impl ShotrApp {
                 .layout(egui::Layout::left_to_right(egui::Align::Center)),
         );
         ui.spacing_mut().item_spacing = egui::vec2(theme::PILL_GAP, 0.0);
-        for (tool, key) in TOOLS {
-            if tool == Tool::Select {
+        for (group, (key, stops)) in super::GROUPS.iter().enumerate() {
+            if stops[0].tool() == Tool::Select {
                 separator(&mut ui);
             }
-            if super::icons::tool_button(&mut ui, tool, self.tool == tool, Some(key)).clicked() {
-                self.finish_text_edit();
-                self.tool = tool;
+            // The icon follows the stop in hand, so a button never claims to be
+            // a shape it is not — with four shapes behind one key that is the
+            // only thing saying which one a press will draw.
+            let showing = self.group_showing(group);
+            let on = showing.tool() == self.tool && showing.matches_tool_state(self);
+            let form = match showing {
+                super::Stop::Arrow(f) => f,
+                _ => ArrowForm::Straight,
+            };
+            if super::icons::tool_button(&mut ui, showing.tool(), form, on, Some(*key)).clicked() {
+                // The button steps through the forms exactly as the key does,
+                // so a mouse user is not shut out of the later ones.
+                let back = ui.input(|i| i.modifiers.shift);
+                self.pick_group(group, back);
             }
         }
     }
@@ -724,8 +734,12 @@ impl ShotrApp {
     /// The controls belonging to the tool in hand.
     fn tool_options(&mut self, ui: &mut egui::Ui) {
         let before = self.annotation_dials();
+        // Which controls to show: the selected shape's, if there is one. Every
+        // branch below has to read *this* and not `self.tool`, or a control
+        // goes missing the moment the same shape is reached through Select.
+        let kind = self.options_kind();
 
-        match self.tool {
+        match kind {
             Tool::Arrow => {
                 self.swatches(ui);
                 controls::divider(ui);
@@ -773,12 +787,12 @@ impl ShotrApp {
                 controls::slider(ui, t("Stroke"), &mut self.annot_stroke, 1.0..=40.0, "");
                 controls::divider(ui);
                 controls::caption(ui, t("Fill"));
-                let ink = self.ink(self.tool);
+                let ink = self.ink(kind);
                 let filled = egui::Color32::from_rgba_unmultiplied(ink[0], ink[1], ink[2], ink[3]);
                 if controls::fill_chip(ui, self.annot_filled, filled).clicked() {
                     self.annot_filled = !self.annot_filled;
                 }
-                if self.tool == Tool::Rect {
+                if kind == Tool::Rect {
                     controls::caption(ui, t("Corner"));
                     controls::stepper(ui, &mut self.annot_corner, 0.0..=120.0, 4.0);
                 }
@@ -798,33 +812,63 @@ impl ShotrApp {
             Tool::Highlight => {
                 self.swatches(ui);
                 controls::divider(ui);
+                for (form, name) in PAINTS {
+                    if controls::pill(ui, t(name), self.annot_paint == form).clicked() {
+                        self.annot_paint = form;
+                    }
+                }
+                controls::divider(ui);
+                if self.freehand() {
+                    controls::slider(ui, t("Width"), &mut self.annot_stroke, 2.0..=80.0, "");
+                    controls::divider(ui);
+                }
                 let mut pct = self.annot_paint_alpha as f32 / 255.0 * 100.0;
                 if controls::slider(ui, t("Opacity"), &mut pct, 5.0..=100.0, "%").changed() {
                     self.annot_paint_alpha = (pct / 100.0 * 255.0).round() as u8;
                 }
                 self.rim_options(ui);
             }
-            Tool::Select | Tool::Fill => {
-                for (shift, name) in ORDERING {
-                    if controls::pill(ui, t(name), false).clicked() {
-                        self.reorder_selected_layer(shift);
-                    }
-                }
-                if controls::pill(ui, t("Duplicate"), false).clicked() {
-                    self.duplicate_selected_layer();
-                }
+            Tool::Badge => {
+                self.swatches(ui);
                 controls::divider(ui);
-                if super::icons::glyph_button(
-                    ui,
-                    Glyph::Trash,
-                    true,
-                    egui::vec2(controls::SQUARE, controls::H),
-                )
-                .on_hover_text(t("Delete the selected shape  ⌫"))
-                .clicked()
+                controls::caption(ui, t("Size"));
+                controls::stepper(ui, &mut self.annot_font_size, 10.0..=160.0, 2.0);
+                self.rim_options(ui);
+            }
+            Tool::Select | Tool::Fill => {}
+        }
+
+        // The stack controls come *after* the shape's own dials, because with
+        // something selected the row is that shape's settings plus what can be
+        // done to it — not a separate mode.
+        if self.tool == Tool::Select && self.selected_layer.is_some() {
+            controls::divider(ui);
+            let square = egui::vec2(controls::SQUARE, controls::H);
+            for (shift, glyph, name) in ORDERING {
+                if super::icons::glyph_button(ui, glyph, true, square)
+                    .on_hover_text(t(name))
+                    .clicked()
                 {
-                    self.delete_selected_layer();
+                    self.reorder_selected_layer(shift);
                 }
+            }
+            if super::icons::glyph_button(ui, Glyph::Duplicate, true, square)
+                .on_hover_text(t("Duplicate"))
+                .clicked()
+            {
+                self.duplicate_selected_layer();
+            }
+            controls::divider(ui);
+            if super::icons::glyph_button(
+                ui,
+                Glyph::Trash,
+                true,
+                egui::vec2(controls::SQUARE, controls::H),
+            )
+            .on_hover_text(t("Delete the selected shape  ⌫"))
+            .clicked()
+            {
+                self.delete_selected_layer();
             }
         }
 
@@ -919,7 +963,12 @@ impl ShotrApp {
     /// drawing above have to agree; a test lays out every row for real and
     /// fails if they drift.
     fn row_width(&self, ui: &egui::Ui) -> f32 {
-        row_width(ui, self.tool)
+        row_width(
+            ui,
+            self.options_kind(),
+            self.freehand(),
+            self.tool == Tool::Select && self.selected_layer.is_some(),
+        )
     }
 
     // --------------------------------------------------------- the status bar
@@ -1097,9 +1146,15 @@ fn tool_row_width() -> f32 {
 ///
 /// Eased rather than jumped, so switching tools reads as one object changing
 /// shape instead of two different bars.
-fn capsule_width(ui: &egui::Ui, open: bool, tool: Tool) -> f32 {
+fn capsule_width(
+    ui: &egui::Ui,
+    open: bool,
+    tool: Tool,
+    freehand: bool,
+    ordering: bool,
+) -> f32 {
     let content = if open {
-        (row_width(ui, tool) + OPT_PAD_X * 2.0).max(tool_row_width())
+        (row_width(ui, tool, freehand, ordering) + OPT_PAD_X * 2.0).max(tool_row_width())
     } else {
         tool_row_width()
     };
@@ -1149,7 +1204,7 @@ impl Item {
 /// if egui let a row be built from data. It cannot, because each control needs
 /// a different `&mut`, so the drawing is written out by hand in `tool_options`
 /// and a test lays out every row for real and fails if the two drift apart.
-fn row_items(tool: Tool) -> Vec<Item> {
+fn row_items(tool: Tool, freehand: bool) -> Vec<Item> {
     let stroke = || Item::Slider(t("Stroke"));
     // The rim group, on every row that puts ink into the picture.
     let rim = |v: &mut Vec<Item>| {
@@ -1176,6 +1231,16 @@ fn row_items(tool: Tool) -> Vec<Item> {
                 Item::Square,
                 Item::Square,
                 Item::Square,
+            ];
+            rim(&mut v);
+            v
+        }
+        Tool::Badge => {
+            let mut v = vec![
+                Item::Swatches,
+                Item::Divider,
+                Item::Caption(t("Size")),
+                Item::Stepper,
             ];
             rim(&mut v);
             v
@@ -1221,24 +1286,35 @@ fn row_items(tool: Tool) -> Vec<Item> {
             v
         }
         Tool::Highlight => {
-            let mut v = vec![Item::Swatches, Item::Divider, Item::Slider(t("Opacity"))];
+            let mut v = vec![Item::Swatches, Item::Divider];
+            v.extend(PAINTS.map(|(_, name)| Item::Pill(t(name))));
+            v.push(Item::Divider);
+            if freehand {
+                v.push(Item::Slider(t("Width")));
+                v.push(Item::Divider);
+            }
+            v.push(Item::Slider(t("Opacity")));
             rim(&mut v);
             v
         }
-        Tool::Select | Tool::Fill => {
-            let mut v: Vec<Item> = ORDERING.iter().map(|(_, n)| Item::Pill(t(n))).collect();
-            v.push(Item::Pill(t("Duplicate")));
-            v.push(Item::Divider);
-            v.push(Item::Square);
-            v
-        }
+        Tool::Select | Tool::Fill => Vec::new(),
     }
 }
 
 /// How wide one tool's options row lays out — the controls only, without the
 /// inline padding that keeps them off the capsule's edge.
-fn row_width(ui: &egui::Ui, tool: Tool) -> f32 {
-    let (width, widgets) = row_items(tool)
+fn row_width(ui: &egui::Ui, tool: Tool, freehand: bool, ordering: bool) -> f32 {
+    let mut items = row_items(tool, freehand);
+    if ordering {
+        if !items.is_empty() {
+            items.push(Item::Divider);
+        }
+        items.extend(ORDERING.iter().map(|_| Item::Square));
+        items.push(Item::Square);
+        items.push(Item::Divider);
+        items.push(Item::Square);
+    }
+    let (width, widgets) = items
         .iter()
         .map(|item| item.extent(ui))
         .fold((0.0, 0.0), |(w, n), (iw, in_)| (w + iw, n + in_));
@@ -1501,38 +1577,46 @@ mod tests {
         }
     }
 
-    /// Every tool the pill offers needs a key, and no key may be used twice —
-    /// a duplicate would silently make one tool unreachable.
+    /// Every button needs a key, and no key may be used twice — a duplicate
+    /// would silently make one button unreachable.
     #[test]
-    fn every_tool_has_its_own_key() {
-        let mut keys: Vec<char> = TOOLS.iter().map(|(_, k)| *k).collect();
+    fn every_button_has_its_own_key() {
+        let mut keys: Vec<char> = super::super::GROUPS.iter().map(|(k, _)| *k).collect();
         keys.sort_unstable();
         keys.dedup();
-        assert_eq!(keys.len(), TOOLS.len(), "two tools share a key");
+        assert_eq!(
+            keys.len(),
+            super::super::GROUPS.len(),
+            "two buttons share a key"
+        );
     }
 
-    /// The drawing tools sit on the digits in the order they are shown, and
+    /// The drawing buttons sit on the digits in the order they are shown, and
     /// Select takes the key beside them rather than the far end of the row.
     #[test]
-    fn the_drawing_tools_run_along_the_digits_and_select_sits_next_to_them() {
-        let drawing: Vec<char> = TOOLS[..7].iter().map(|(_, k)| *k).collect();
-        assert_eq!(drawing, vec!['1', '2', '3', '4', '5', '6', '7']);
+    fn the_drawing_buttons_run_along_the_digits_and_select_sits_next_to_them() {
+        let groups = super::super::GROUPS;
+        let drawing: Vec<char> = groups[..6].iter().map(|(k, _)| *k).collect();
+        assert_eq!(drawing, vec!['1', '2', '3', '4', '5', '6']);
         assert_eq!(
-            TOOLS[7],
-            (Tool::Select, '`'),
+            groups[6].0, '`',
             "Select must stay on the key left of 1 — it is reached far more \
              often than any one drawing tool"
         );
-    }
-
-    /// The pill's order is part of the design: the six drawing tools, then
-    /// Select on its own behind a separator.
-    #[test]
-    fn select_is_the_last_tool_in_the_pill() {
-        assert_eq!(TOOLS[7].0, Tool::Select, "Select moved out of last place");
+        assert_eq!(groups[6].1[0].tool(), Tool::Select);
         assert!(
-            TOOLS[..7].iter().all(|(t, _)| *t != Tool::Select),
+            groups[..6]
+                .iter()
+                .all(|(_, stops)| stops.iter().all(|s| s.tool() != Tool::Select)),
             "Select appears twice"
         );
+    }
+
+    /// A button with no stops would draw nothing and answer no key.
+    #[test]
+    fn every_button_offers_at_least_one_form() {
+        for (key, stops) in super::super::GROUPS {
+            assert!(!stops.is_empty(), "the {key} button has no forms");
+        }
     }
 }

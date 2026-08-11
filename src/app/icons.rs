@@ -30,6 +30,11 @@ pub enum Glyph {
     More,
     /// Delete the selected annotation.
     Trash,
+    /// Move the selected shape towards the viewer, and away from them.
+    Forward,
+    Back,
+    /// Copy the selected shape.
+    Duplicate,
     /// The window controls. `cfg`-ed away on macOS, which draws Apple's
     /// coloured lights instead and must not be able to reach for these.
     #[cfg(not(target_os = "macos"))]
@@ -82,6 +87,43 @@ pub fn draw_glyph(painter: &egui::Painter, rect: egui::Rect, glyph: Glyph, color
             painter.line_segment([at(0.14, 0.22), at(0.24, 1.0)], stroke);
             painter.line_segment([at(0.86, 0.22), at(0.76, 1.0)], stroke);
             painter.line_segment([at(0.24, 1.0), at(0.76, 1.0)], stroke);
+        }
+        // A card lifting off a stack, and one sinking into it. The chevron is
+        // what says which way, because two overlapping squares alone read the
+        // same either way round.
+        Glyph::Forward => {
+            painter.rect_stroke(
+                egui::Rect::from_min_max(at(0.0, 0.40), at(0.62, 1.0)),
+                2.0,
+                stroke,
+                egui::StrokeKind::Middle,
+            );
+            painter.line_segment([at(0.55, 0.30), at(0.82, 0.03)], stroke);
+            painter.line_segment([at(0.82, 0.03), at(1.0, 0.30)], stroke);
+        }
+        Glyph::Back => {
+            painter.rect_stroke(
+                egui::Rect::from_min_max(at(0.0, 0.0), at(0.62, 0.60)),
+                2.0,
+                stroke,
+                egui::StrokeKind::Middle,
+            );
+            painter.line_segment([at(0.55, 0.70), at(0.82, 0.97)], stroke);
+            painter.line_segment([at(0.82, 0.97), at(1.0, 0.70)], stroke);
+        }
+        Glyph::Duplicate => {
+            painter.rect_stroke(
+                egui::Rect::from_min_max(at(0.0, 0.28), at(0.70, 1.0)),
+                2.0,
+                stroke,
+                egui::StrokeKind::Middle,
+            );
+            painter.rect_stroke(
+                egui::Rect::from_min_max(at(0.30, 0.0), at(1.0, 0.72)),
+                2.0,
+                stroke,
+                egui::StrokeKind::Middle,
+            );
         }
         #[cfg(not(target_os = "macos"))]
         Glyph::Close => {
@@ -147,6 +189,7 @@ pub fn glyph_button(
 pub fn tool_button(
     ui: &mut egui::Ui,
     tool: Tool,
+    arrow: crate::annotate::ArrowForm,
     selected: bool,
     key: Option<char>,
 ) -> egui::Response {
@@ -182,7 +225,7 @@ pub fn tool_button(
     } else {
         visuals.fg_stroke.color
     };
-    draw(painter, rect, tool, ink);
+    draw(painter, rect, tool, arrow, ink);
 
     match key {
         Some(digit) => {
@@ -212,8 +255,47 @@ fn glyph_box(rect: egui::Rect) -> egui::Rect {
     rect.shrink(inset)
 }
 
+/// Fill a closed outline that may be concave, as an explicit mesh.
+///
+/// epaint's `convex_polygon` means what it says, and the arrow is concave at
+/// the notch where the head meets the shaft. Handing the tessellator a quad
+/// with two coincident corners — which the head is, being a triangle wearing a
+/// quad's shape — makes it normalise a zero-length edge and spray a triangle
+/// the size of the window across the editor. That is not a hypothetical; it is
+/// what this replaced.
+///
+/// What works is that the outline is *two walks of the same spine*: point `i`
+/// on one side pairs with `n-1-i` on the other, so the shape falls into a strip
+/// of quads. Emitting the triangles directly skips the tessellator's geometry
+/// entirely, so there is nothing left to divide by zero.
+pub fn fill_outline(painter: &egui::Painter, pts: &[egui::Pos2], color: egui::Color32) {
+    let n = pts.len();
+    if n < 4 {
+        return;
+    }
+    let mut mesh = egui::epaint::Mesh::default();
+    for &p in pts {
+        mesh.colored_vertex(p, color);
+    }
+    for i in 0..n / 2 {
+        let (left, right) = (i as u32, (n - 1 - i) as u32);
+        let (next_left, next_right) = ((i + 1) as u32, (n - 2 - i) as u32);
+        // Degenerate rungs — the head's, where both "next" indices are the tip
+        // — collapse to zero area and draw nothing rather than misbehaving.
+        mesh.add_triangle(left, next_left, next_right);
+        mesh.add_triangle(left, next_right, right);
+    }
+    painter.add(egui::Shape::mesh(mesh));
+}
+
 /// Paint `tool`'s glyph inside `rect`.
-pub fn draw(painter: &egui::Painter, rect: egui::Rect, tool: Tool, color: egui::Color32) {
+pub fn draw(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    tool: Tool,
+    arrow: crate::annotate::ArrowForm,
+    color: egui::Color32,
+) {
     // Glyphs are authored in a 0..1 square with a margin, then mapped out.
     let box_ = glyph_box(rect);
     let at = |x: f32, y: f32| egui::pos2(box_.min.x + x * box_.width(), box_.min.y + y * box_.height());
@@ -234,24 +316,38 @@ pub fn draw(painter: &egui::Painter, rect: egui::Rect, tool: Tool, color: egui::
             ));
         }
         Tool::Arrow => {
-            // A solid silhouette, because that is what the tool now draws: a
-            // stroked glyph here would promise the line the Line tool draws.
-            let shaft = 0.11;
-            painter.add(egui::Shape::convex_polygon(
-                vec![
-                    at(0.0, 0.62 - shaft),
-                    at(0.52, 0.62 - shaft),
-                    at(0.52, 0.62 + shaft),
-                    at(0.0, 0.62 + shaft),
-                ],
+            // Drawn from the very outline the tool rasterises, so the button
+            // cannot promise a shape the drag does not make — and so it changes
+            // when the bend does, which with three forms on one key is the only
+            // thing saying which one a press will draw.
+            let pts: Vec<egui::Pos2> = crate::annotate::arrow_shape(arrow)
+                .into_iter()
+                // The unit frame runs tail-to-tip along +x; turn it so the icon
+                // points up and to the right like every other pointer glyph.
+                //
+                // Fattened across the shaft and nowhere else. At 34px the true
+                // proportions come out as a hairline, and a glyph is allowed to
+                // be a bolder cut of a mark — but not a different one, so only
+                // the cross-axis is touched and the silhouette still comes from
+                // the tool's own outline.
+                .map(|[u, v]| {
+                    let v = v * 1.8;
+                    at(0.06 + u * 0.88 - v * 0.5, 0.94 - u * 0.88 - v * 0.5)
+                })
+                .collect();
+            fill_outline(painter, &pts, color);
+        }
+        Tool::Badge => {
+            let c = box_.center();
+            let r = box_.width() * 0.42;
+            painter.circle_stroke(c, r, stroke);
+            painter.text(
+                c,
+                egui::Align2::CENTER_CENTER,
+                "1",
+                egui::FontId::new(box_.height() * 0.52, egui::FontFamily::Proportional),
                 color,
-                egui::Stroke::NONE,
-            ));
-            painter.add(egui::Shape::convex_polygon(
-                vec![at(1.0, 0.0), at(0.42, 0.30), at(0.72, 0.90)],
-                color,
-                egui::Stroke::NONE,
-            ));
+            );
         }
         Tool::Line => {
             let a = at(0.0, 1.0);
@@ -336,12 +432,20 @@ mod tests {
             let painter = ui.painter().clone();
             for tool in std::iter::once(Tool::Select).chain(Tool::DRAWABLE) {
                 for side in [16.0_f32, BUTTON, 96.0] {
-                    draw(
-                        &painter,
-                        egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(side, side)),
-                        tool,
-                        egui::Color32::WHITE,
-                    );
+                    // Every arrow form too: the button draws whichever one is
+                    // in hand, so all three go through this path.
+                    for form in crate::annotate::ArrowForm::ALL {
+                        draw(
+                            &painter,
+                            egui::Rect::from_min_size(
+                                egui::pos2(0.0, 0.0),
+                                egui::vec2(side, side),
+                            ),
+                            tool,
+                            form,
+                            egui::Color32::WHITE,
+                        );
+                    }
                 }
             }
         });
