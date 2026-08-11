@@ -1126,6 +1126,13 @@ fn dashes(a: [f32; 2], b: [f32; 2], gap: f32) -> Vec<([f32; 2], [f32; 2])> {
     out
 }
 
+/// How far one shot pixel travels on screen.
+fn screen_unit(to_screen: &dyn Fn([f32; 2]) -> egui::Pos2) -> f32 {
+    (to_screen([1.0, 0.0]).x - to_screen([0.0, 0.0]).x)
+        .abs()
+        .max(f32::EPSILON)
+}
+
 /// The four corners of a rectangle, in order.
 fn corners(a: [f32; 2], b: [f32; 2]) -> [[f32; 2]; 4] {
     [[a[0], a[1]], [b[0], a[1]], [b[0], b[1]], [a[0], b[1]]]
@@ -1162,15 +1169,40 @@ fn paint_layer_preview(
     };
     let stroke = egui::Stroke::new(width, color);
     let rect = egui::Rect::from_two_pos(a, b);
+    let rim = layer.border * screen_unit(to_screen);
 
     match layer.kind {
         Tool::Arrow | Tool::Rect | Tool::Ellipse => {
+            // The rim is the same shape a stroke wider, drawn underneath — the
+            // exporter gets it from one distance field, so this is the closest
+            // an outline-based painter can come. There is no shadow here at
+            // all: egui cannot blur, and an unblurred approximation would be a
+            // fifth place for the stand-in and the bake to disagree.
+            if rim > 0.5 {
+                let c = layer.border_color;
+                let under = egui::Stroke::new(
+                    width + rim * 2.0,
+                    egui::Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3]),
+                );
+                stroke_shape(painter, layer, to_screen, under);
+            }
             stroke_shape(painter, layer, to_screen, stroke)
         }
         Tool::Highlight => {
-            let pts = corners(layer.a, layer.b)
+            let pts: Vec<egui::Pos2> = corners(layer.a, layer.b)
                 .map(|p| to_screen(turn_in_shot(layer, p)))
                 .to_vec();
+            if rim > 0.5 {
+                let c = layer.border_color;
+                painter.add(egui::Shape::convex_polygon(
+                    pts.clone(),
+                    egui::Color32::TRANSPARENT,
+                    egui::Stroke::new(
+                        rim * 2.0,
+                        egui::Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3]),
+                    ),
+                ));
+            }
             // The paint tool's opacity is the layer's own alpha — a fixed
             // fraction here made every stroke pale while it was being dragged
             // and then jump solid the moment the button came up.

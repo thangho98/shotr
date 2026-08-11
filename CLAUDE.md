@@ -498,6 +498,25 @@ same trap again — so they are not drawn at all rather than drawn dead. Paint's
 "Width" went the same way: it means a brush, and paint here is a rectangular
 marker.
 
+**The rim and the shadow come off the same distance field, in three passes.**
+A red arrow on a red part of the picture disappears, which is what the white
+rim is for, and a rim with nothing under it reads as a sticker that has not
+been cut out, which is what the shadow is for. Both fall out of `rasterise`
+walking the box three times off one `sdf` — shadow, then rim, then ink. That is
+what keeps them exactly concentric: a rim built by drawing the shape twice at
+two widths drifts at the corners, where the two outlines are not parallel.
+
+Two things follow. The shadow is *feathered*, not blurred — coverage falling
+from 1 at the shape's edge to 0 at its reach — because a real gaussian would
+mean an allocation and a convolution per layer, and the falloff is what the eye
+reads anyway. And text cannot use any of it: a glyph here is blitted coverage
+with no edge to offset, so its rim is eight offset copies. Four leaves visible
+notches on a diagonal stroke; eight does not.
+
+The vector stand-in draws the rim and **not** the shadow. egui cannot blur or
+feather, and an unblurred approximation would be a fifth place for the stand-in
+and the bake to disagree — this file already lists four.
+
 **Nothing that follows the pointer may set `dirty`.** One preview render costs
 275ms at the default look and up to 2s with a big shadow — measured with
 `examples/render_demo` on an 8.6Mpx shot — so a gesture that re-bakes the bitmap

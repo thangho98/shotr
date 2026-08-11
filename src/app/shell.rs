@@ -18,7 +18,7 @@ use eframe::egui;
 use super::icons::Glyph;
 use super::theme;
 use super::{Mode, SIDEBAR_W, ShotrApp, Zoom, controls};
-use crate::annotate::{Cover, Head, TextAlign, Tool};
+use crate::annotate::{Cover, Head, Layer, TextAlign, Tool};
 use crate::export;
 use crate::i18n::{t, tf};
 
@@ -63,21 +63,6 @@ const COVERS: [(Cover, &str); 2] = [(Cover::Blur, "Blur"), (Cover::Pixelate, "Pi
 /// Moving a shape through the stack. `1` is towards the viewer.
 const ORDERING: [(isize, &str); 2] = [(1, "Bring forward"), (-1, "Send back")];
 
-/// Every dial the options row can move. Compared as a whole, so a new control
-/// cannot be added without the "apply to the selected shape" rule seeing it.
-type Dials = (
-    crate::settings::Rgba8,
-    f32,
-    f32,
-    f32,
-    u8,
-    bool,
-    f32,
-    Head,
-    Cover,
-    bool,
-    TextAlign,
-);
 /// Clearance the pill needs above the picture, so a shot fitted to the canvas
 /// never slides under it.
 const PILL_CLEARANCE: f32 = 86.0;
@@ -742,6 +727,7 @@ impl ShotrApp {
                         self.annot_head = head;
                     }
                 }
+                self.rim_options(ui);
             }
             Tool::Text => {
                 self.swatches(ui);
@@ -758,6 +744,7 @@ impl ShotrApp {
                         self.annot_align = align;
                     }
                 }
+                self.rim_options(ui);
             }
             Tool::Rect | Tool::Ellipse => {
                 self.swatches(ui);
@@ -774,6 +761,7 @@ impl ShotrApp {
                     controls::caption(ui, t("Corner"));
                     controls::stepper(ui, &mut self.annot_corner, 0.0..=120.0, 4.0);
                 }
+                self.rim_options(ui);
             }
             Tool::Blur => {
                 for (cover, name) in COVERS {
@@ -793,6 +781,7 @@ impl ShotrApp {
                 if controls::slider(ui, t("Opacity"), &mut pct, 5.0..=100.0, "%").changed() {
                     self.annot_paint_alpha = (pct / 100.0 * 255.0).round() as u8;
                 }
+                self.rim_options(ui);
             }
             Tool::Select | Tool::Fill => {
                 for (shift, name) in ORDERING {
@@ -825,6 +814,37 @@ impl ShotrApp {
         }
     }
 
+    /// The rim and its colour, at the end of every row that has ink.
+    ///
+    /// Shared rather than per-tool because the reason it exists — a red arrow
+    /// over a red part of the picture disappears without it — is not a property
+    /// of any one tool.
+    fn rim_options(&mut self, ui: &mut egui::Ui) {
+        controls::divider(ui);
+        controls::slider(ui, t("Rim"), &mut self.annot_border, 0.0..=24.0, "");
+        if controls::fill_chip(
+            ui,
+            self.annot_border > 0.5,
+            egui::Color32::from_rgba_unmultiplied(
+                self.annot_border_color[0],
+                self.annot_border_color[1],
+                self.annot_border_color[2],
+                255,
+            ),
+        )
+        .on_hover_text(t("Rim colour"))
+        .clicked()
+        {
+            // Two rims are worth having and a picker is not: white for a dark
+            // picture, black for a light one.
+            self.annot_border_color = if self.annot_border_color[0] > 127 {
+                [0, 0, 0, 255]
+            } else {
+                [255, 255, 255, 255]
+            };
+        }
+    }
+
     /// The five inks, as the palette drawn into the picture.
     fn swatches(&mut self, ui: &mut egui::Ui) {
         for ink in controls::INK {
@@ -835,42 +855,35 @@ impl ShotrApp {
         }
     }
 
-    /// Every dial the options row can move, as one value to compare against.
-    fn annotation_dials(&self) -> Dials {
-        (
-            self.annot_color,
-            self.annot_stroke,
-            self.annot_font_size,
-            self.annot_blur,
-            self.annot_paint_alpha,
-            self.annot_filled,
-            self.annot_corner,
-            self.annot_head,
-            self.annot_cover,
-            self.annot_underline,
-            self.annot_align,
-        )
+    /// Every dial the options row can move, as the layer a new shape would be.
+    ///
+    /// One list rather than two: `new_layer` already says what a dial *is*, so
+    /// a control added to the row cannot be forgotten by the rule below. A
+    /// tuple of them ran out of road at fourteen, which is where Rust stops
+    /// deriving `PartialEq`.
+    fn annotation_dials(&self) -> Layer {
+        self.new_layer(self.tool, [0.0, 0.0])
     }
 
+    /// Carry a changed dial onto the shape already selected.
     fn apply_dials_to_selection(&mut self) {
         let Some(i) = self.selected_layer else { return };
         let Some(kind) = self.layers.get(i).map(|l| l.kind) else {
             return;
         };
-        let ink = self.ink(kind);
+        let dials = self.new_layer(kind, [0.0, 0.0]);
         let Some(layer) = self.layers.get_mut(i) else {
             return;
         };
-        layer.color = ink;
-        layer.stroke = self.annot_stroke;
-        layer.font_size = self.annot_font_size;
-        layer.blur = self.annot_blur;
-        layer.filled = self.annot_filled;
-        layer.corner = self.annot_corner;
-        layer.head = self.annot_head;
-        layer.cover = self.annot_cover;
-        layer.underline = self.annot_underline;
-        layer.align = self.annot_align;
+        // Everything but the geometry and the words: those belong to the shape,
+        // not to the row.
+        *layer = Layer {
+            a: layer.a,
+            b: layer.b,
+            text: std::mem::take(&mut layer.text),
+            kind,
+            ..dials
+        };
         self.dirty = true;
     }
 
@@ -1080,6 +1093,8 @@ enum Item {
     Stepper,
     Pill(&'static str),
     Square,
+    /// The fill chip, which is wider than a square toggle.
+    Chip,
 }
 
 impl Item {
@@ -1097,6 +1112,7 @@ impl Item {
             Item::Stepper => (controls::STEPPER_W, 1.0),
             Item::Pill(s) => (controls::text_w(ui, s) + controls::PILL_PAD_X * 2.0, 1.0),
             Item::Square => (controls::SQUARE, 1.0),
+            Item::Chip => (controls::CHIP_W, 1.0),
         }
     }
 }
@@ -1109,42 +1125,61 @@ impl Item {
 /// and a test lays out every row for real and fails if the two drift apart.
 fn row_items(tool: Tool) -> Vec<Item> {
     let stroke = || Item::Slider(t("Stroke"));
+    // The rim group, on every row that puts ink into the picture.
+    let rim = |v: &mut Vec<Item>| {
+        v.push(Item::Divider);
+        v.push(Item::Slider(t("Rim")));
+        v.push(Item::Chip);
+    };
     match tool {
         Tool::Arrow => {
             let mut v = vec![Item::Swatches, Item::Divider, stroke(), Item::Divider];
             v.extend(HEADS.map(|(_, name)| Item::Pill(t(name))));
+            rim(&mut v);
             v
         }
-        Tool::Text => vec![
-            Item::Swatches,
-            Item::Divider,
-            Item::Caption(t("Size")),
-            Item::Stepper,
-            Item::Divider,
-            Item::Square,
-            Item::Divider,
-            Item::Square,
-            Item::Square,
-            Item::Square,
-        ],
-        Tool::Rect => vec![
-            Item::Swatches,
-            Item::Divider,
-            stroke(),
-            Item::Divider,
-            Item::Caption(t("Fill")),
-            Item::Square,
-            Item::Caption(t("Corner")),
-            Item::Stepper,
-        ],
-        Tool::Ellipse => vec![
-            Item::Swatches,
-            Item::Divider,
-            stroke(),
-            Item::Divider,
-            Item::Caption(t("Fill")),
-            Item::Square,
-        ],
+        Tool::Text => {
+            let mut v = vec![
+                Item::Swatches,
+                Item::Divider,
+                Item::Caption(t("Size")),
+                Item::Stepper,
+                Item::Divider,
+                Item::Square,
+                Item::Divider,
+                Item::Square,
+                Item::Square,
+                Item::Square,
+            ];
+            rim(&mut v);
+            v
+        }
+        Tool::Rect => {
+            let mut v = vec![
+                Item::Swatches,
+                Item::Divider,
+                stroke(),
+                Item::Divider,
+                Item::Caption(t("Fill")),
+                Item::Chip,
+                Item::Caption(t("Corner")),
+                Item::Stepper,
+            ];
+            rim(&mut v);
+            v
+        }
+        Tool::Ellipse => {
+            let mut v = vec![
+                Item::Swatches,
+                Item::Divider,
+                stroke(),
+                Item::Divider,
+                Item::Caption(t("Fill")),
+                Item::Chip,
+            ];
+            rim(&mut v);
+            v
+        }
         Tool::Blur => {
             let mut v: Vec<Item> = COVERS.iter().map(|(_, n)| Item::Pill(t(n))).collect();
             v.push(Item::Divider);
@@ -1153,11 +1188,11 @@ fn row_items(tool: Tool) -> Vec<Item> {
             v.push(Item::Caption(t("Pixelate survives a re-encode.")));
             v
         }
-        Tool::Highlight => vec![
-            Item::Swatches,
-            Item::Divider,
-            Item::Slider(t("Opacity")),
-        ],
+        Tool::Highlight => {
+            let mut v = vec![Item::Swatches, Item::Divider, Item::Slider(t("Opacity"))];
+            rim(&mut v);
+            v
+        }
         Tool::Select | Tool::Fill => {
             let mut v: Vec<Item> = ORDERING.iter().map(|(_, n)| Item::Pill(t(n))).collect();
             v.push(Item::Pill(t("Duplicate")));

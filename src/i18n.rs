@@ -277,6 +277,8 @@ static VI: &[(&str, &str)] = &[
     ("Releases", "Các bản phát hành"),
     ("Repeat diagonally across the image — the anti-reuse look", "Lặp lại chéo khắp ảnh — kiểu chống dùng lại ảnh"),
     ("Reset to defaults", "↺ Về mặc định"),
+    ("Rim", "Viền"),
+    ("Rim colour", "Màu viền"),
     ("Rounded plate", "Nền bo tròn"),
     ("Save", "Lưu"),
     ("Save As…", "Lưu thành…"),

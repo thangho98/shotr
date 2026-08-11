@@ -96,6 +96,16 @@ pub struct Layer {
     pub cover: Cover,
     pub underline: bool,
     pub align: TextAlign,
+    /// White rim around the shape, in original screenshot pixels. 0 is none.
+    ///
+    /// The reason it exists is legibility, not decoration: a red arrow over a
+    /// red part of the picture disappears without it. Off by default for
+    /// everything except the arrow, which is the tool most often dropped on top
+    /// of whatever happens to be there.
+    pub border: f32,
+    pub border_color: Rgba8,
+    /// How far the shadow feathers out, in original screenshot pixels.
+    pub shadow: f32,
 }
 
 /// What sits at the far end of an arrow.
@@ -156,6 +166,9 @@ impl Layer {
             cover: Cover::default(),
             underline: false,
             align: TextAlign::default(),
+            border: 0.0,
+            border_color: [255, 255, 255, 255],
+            shadow: 0.0,
         }
     }
 
@@ -246,6 +259,9 @@ pub fn apply(img: &mut RgbaImage, layers: &[Layer], scale: f32, font: Option<&Fo
             color: layer.color,
             stroke,
             turn,
+            border: layer.border * scale,
+            border_color: layer.border_color,
+            shadow: layer.shadow * scale,
             filled: layer.filled,
             corner: layer.corner * scale,
         };
@@ -271,6 +287,8 @@ pub fn apply(img: &mut RgbaImage, layers: &[Layer], scale: f32, font: Option<&Fo
                         angle: layer.angle,
                         underline: layer.underline,
                         align: layer.align,
+                        border: layer.border * scale,
+                        border_color: layer.border_color,
                     };
                     draw_text(img, font, &label, &layer.text);
                 }
@@ -334,6 +352,9 @@ struct Ink {
     color: Rgba8,
     stroke: f32,
     turn: Turn,
+    border: f32,
+    border_color: Rgba8,
+    shadow: f32,
     /// Whether the shape is an area rather than an outline. A filled shape
     /// keeps its stroke: the fill is the interior *plus* the outline, which is
     /// what the distance field gives for free by not taking the absolute value.
@@ -371,14 +392,21 @@ struct Turn {
 fn rasterise_turned(
     img: &mut RgbaImage,
     bounds: [f32; 4],
-    color: Rgba8,
-    turn: Turn,
+    ink: &Ink,
     sdf: impl Fn(f32, f32) -> f32,
     half_stroke: f32,
 ) {
-    let Turn { angle, centre } = turn;
+    let Turn { angle, centre } = ink.turn;
+    // The rim and the shadow both reach outside the shape's own box.
+    let grow = ink.border + ink.shadow * (1.0 + SHADOW_DROP) + 2.0;
+    let bounds = [
+        bounds[0] - grow,
+        bounds[1] - grow,
+        bounds[2] + grow,
+        bounds[3] + grow,
+    ];
     if angle.abs() < 1e-4 {
-        rasterise(img, bounds, color, sdf, half_stroke);
+        rasterise(img, bounds, ink, sdf, half_stroke);
         return;
     }
     // The upright bounds no longer contain the shape, so sweep the box that
@@ -404,7 +432,7 @@ fn rasterise_turned(
     rasterise(
         img,
         swept,
-        color,
+        ink,
         |px, py| {
             let (dx, dy) = (px - cx, py - cy);
             sdf(cx + dx * ucos - dy * usin, cy + dx * usin + dy * ucos)
@@ -413,10 +441,23 @@ fn rasterise_turned(
     );
 }
 
+/// How far the shadow falls below the shape, as a fraction of its reach.
+const SHADOW_DROP: f32 = 0.35;
+/// How dark the shadow is at its darkest.
+const SHADOW_ALPHA: f32 = 0.38;
+
+/// Rasterise a shape, its rim and its shadow from one distance field.
+///
+/// Three passes back to front, all off the same `sdf`, which is what keeps them
+/// exactly concentric — a rim built by drawing the shape twice at two widths
+/// would drift at the corners, where the two outlines are not parallel.
+///
+/// `sdf` gives distance to the *figure*; subtracting `half_stroke` turns that
+/// into a signed distance to the ink's own edge, negative inside.
 fn rasterise(
     img: &mut RgbaImage,
     bounds: [f32; 4],
-    color: Rgba8,
+    ink: &Ink,
     sdf: impl Fn(f32, f32) -> f32,
     half_stroke: f32,
 ) {
@@ -424,13 +465,36 @@ fn rasterise(
     let y0 = bounds[1].floor().max(0.0) as u32;
     let x1 = (bounds[2].ceil() as i64).clamp(0, img.width() as i64) as u32;
     let y1 = (bounds[3].ceil() as i64).clamp(0, img.height() as i64) as u32;
+    let solid = |px: f32, py: f32| sdf(px, py) - half_stroke;
 
+    if ink.shadow > 0.5 {
+        let drop = ink.shadow * SHADOW_DROP;
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let d = solid(x as f32 + 0.5, y as f32 + 0.5 - drop) - ink.border;
+                let cov = (1.0 - d / ink.shadow).clamp(0.0, 1.0) * SHADOW_ALPHA;
+                if cov > 0.0 {
+                    blend(img, x, y, Rgba([0, 0, 0, 255]), cov);
+                }
+            }
+        }
+    }
+    if ink.border > 0.5 {
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let d = solid(x as f32 + 0.5, y as f32 + 0.5) - ink.border;
+                let cov = (0.5 - d).clamp(0.0, 1.0);
+                if cov > 0.0 {
+                    blend(img, x, y, Rgba(ink.border_color), cov);
+                }
+            }
+        }
+    }
     for y in y0..y1 {
         for x in x0..x1 {
-            let d = sdf(x as f32 + 0.5, y as f32 + 0.5);
-            let cov = (half_stroke + 0.5 - d).clamp(0.0, 1.0);
+            let cov = (0.5 - solid(x as f32 + 0.5, y as f32 + 0.5)).clamp(0.0, 1.0);
             if cov > 0.0 {
-                blend(img, x, y, Rgba(color), cov);
+                blend(img, x, y, Rgba(ink.color), cov);
             }
         }
     }
@@ -482,8 +546,7 @@ fn draw_arrow(img: &mut RgbaImage, a: [f32; 2], b: [f32; 2], ink: &Ink, head: He
     rasterise_turned(
         img,
         [x0, y0, x1, y1],
-        ink.color,
-        ink.turn,
+        ink,
         |px, py| {
             let mut d = f32::MAX;
             for (from, to) in &shaft {
@@ -550,8 +613,7 @@ fn draw_rect(img: &mut RgbaImage, a: [f32; 2], b: [f32; 2], ink: &Ink) {
     rasterise_turned(
         img,
         [x0 - pad, y0 - pad, x1 + pad, y1 + pad],
-        ink.color,
-        ink.turn,
+        ink,
         |px, py| ink.shape_of(sd_round_box(px, py, cx, cy, hw, hh, r)),
         ink.stroke / 2.0,
     );
@@ -566,8 +628,7 @@ fn draw_ellipse(img: &mut RgbaImage, a: [f32; 2], b: [f32; 2], ink: &Ink) {
     rasterise_turned(
         img,
         [x0 - pad, y0 - pad, x1 + pad, y1 + pad],
-        ink.color,
-        ink.turn,
+        ink,
         |px, py| ink.shape_of(sd_ellipse(px, py, cx, cy, rx, ry)),
         ink.stroke / 2.0,
     );
@@ -679,6 +740,8 @@ struct Label {
     angle: f32,
     underline: bool,
     align: TextAlign,
+    border: f32,
+    border_color: Rgba8,
 }
 
 impl Label {
@@ -701,11 +764,7 @@ fn draw_text(img: &mut RgbaImage, font: &FontArc, label: &Label, body: &str) {
     let dx = w * label.shift();
 
     if label.angle.abs() < 1e-4 {
-        let (x, y) = (label.at[0] - dx, label.at[1]);
-        text::draw(img, font, size, x, y, label.color, body);
-        if label.underline {
-            text::underline(img, font, size, x, y, w, label.color);
-        }
+        stamp_line(img, font, label, body, label.at[0] - dx, label.at[1], w);
         return;
     }
 
@@ -713,16 +772,14 @@ fn draw_text(img: &mut RgbaImage, font: &FontArc, label: &Label, body: &str) {
     // descenders, and the scratch image is padded generously anyway.
     let h = size * 1.35;
     // A margin, so the turned corners are not shaved off the scratch image.
-    let pad = size;
+    // The rim reaches outside the glyphs, so it has to be in the margin too.
+    let pad = size + label.border;
     let mut stamp = RgbaImage::from_pixel(
         (w + pad * 2.0).ceil() as u32,
         (h + pad * 2.0).ceil() as u32,
         Rgba([0, 0, 0, 0]),
     );
-    text::draw(&mut stamp, font, size, pad, pad, label.color, body);
-    if label.underline {
-        text::underline(&mut stamp, font, size, pad, pad, w, label.color);
-    }
+    stamp_line(&mut stamp, font, label, body, pad, pad, w);
     let turned = crate::render::watermark::rotate(&stamp, label.angle);
 
     // The label turns about its anchor, but `rotate` turns the scratch image
@@ -742,6 +799,55 @@ fn draw_text(img: &mut RgbaImage, font: &FontArc, label: &Label, body: &str) {
     let ox = label.at[0] - (tw / 2.0 + vx * cos - vy * sin);
     let oy = label.at[1] - (th / 2.0 + vx * sin + vy * cos);
     image::imageops::overlay(img, &turned, ox.round() as i64, oy.round() as i64);
+}
+
+/// One line of text with whatever rim and rule it carries.
+///
+/// The rim is eight offset copies rather than a distance field, because a
+/// glyph here is blitted coverage and not an SDF — there is no edge to offset.
+/// Eight directions is what stops the corners of a letter thinning out; four
+/// leaves visible notches on a diagonal stroke like the leg of an `R`.
+fn stamp_line(
+    img: &mut RgbaImage,
+    font: &FontArc,
+    label: &Label,
+    body: &str,
+    x: f32,
+    y: f32,
+    w: f32,
+) {
+    let size = label.size;
+    if label.border > 0.5 {
+        let r = label.border;
+        let d = r * std::f32::consts::FRAC_1_SQRT_2;
+        for (ox, oy) in [
+            (-r, 0.0),
+            (r, 0.0),
+            (0.0, -r),
+            (0.0, r),
+            (-d, -d),
+            (d, -d),
+            (-d, d),
+            (d, d),
+        ] {
+            text::draw(img, font, size, x + ox, y + oy, Rgba(label.border_color), body);
+            if label.underline {
+                text::underline(
+                    img,
+                    font,
+                    size,
+                    x + ox,
+                    y + oy,
+                    w,
+                    Rgba(label.border_color),
+                );
+            }
+        }
+    }
+    text::draw(img, font, size, x, y, label.color, body);
+    if label.underline {
+        text::underline(img, font, size, x, y, w, label.color);
+    }
 }
 
 /// Perceptual brightness, 0.0 to 1.0.
@@ -1230,6 +1336,67 @@ mod tests {
             lowest(true) > lowest(false),
             "the underline drew no lower than the text itself"
         );
+    }
+
+    /// The rim exists so a red arrow on a red picture can still be seen. This
+    /// is the assertion that it lands *outside* the ink rather than eating into
+    /// it — a rim drawn inside would thin the shape instead of ringing it.
+    #[test]
+    fn the_rim_rings_the_shape_without_eating_into_it() {
+        let draw = |border: f32| {
+            let mut img = RgbaImage::from_pixel(100, 100, Rgba([0, 0, 0, 255]));
+            let mut l = layer(Tool::Rect, [30.0, 30.0], [70.0, 70.0]);
+            l.stroke = 4.0;
+            l.filled = true;
+            l.border = border;
+            l.border_color = [255, 255, 255, 255];
+            apply(&mut img, &[l], 1.0, None);
+            img
+        };
+        let bare = draw(0.0);
+        let ringed = draw(4.0);
+
+        assert_eq!(
+            bare.get_pixel(50, 50).0,
+            ringed.get_pixel(50, 50).0,
+            "the rim changed the middle of the shape, so it is being drawn on top"
+        );
+        // Just outside the shape's own edge, which sits at y=70 plus half the
+        // stroke. A rim reaches past that; nothing else does.
+        assert_eq!(bare.get_pixel(50, 75).0, [0, 0, 0, 255]);
+        let ring = ringed.get_pixel(50, 75).0;
+        assert!(
+            ring[0] > 200 && ring[1] > 200 && ring[2] > 200,
+            "outside the shape reads {ring:?}, not the white rim"
+        );
+    }
+
+    /// The shadow is the reason the rim reads at all on a light picture. It has
+    /// to fall *outside* the rim, and it has to be soft — a hard edge would be
+    /// a second outline rather than a shadow.
+    #[test]
+    fn the_shadow_falls_outside_the_shape_and_fades() {
+        let mut img = RgbaImage::from_pixel(120, 120, Rgba([255, 255, 255, 255]));
+        let mut l = layer(Tool::Rect, [40.0, 30.0], [80.0, 60.0]);
+        l.stroke = 4.0;
+        l.filled = true;
+        l.shadow = 10.0;
+        apply(&mut img, &[l], 1.0, None);
+
+        // The shape's own edge is at y = 60 + half the stroke, and the shadow
+        // reaches ten past that with a 3.5px drop, so all three samples sit
+        // inside the falloff.
+        let near = luminance(img.get_pixel(60, 64).0);
+        let mid = luminance(img.get_pixel(60, 69).0);
+        let far = luminance(img.get_pixel(60, 74).0);
+        let away = luminance(img.get_pixel(60, 110).0);
+        assert!(near < 0.98, "there is no shadow under the shape at all");
+        assert!(
+            near < mid && mid < far,
+            "the shadow reads {near:.2} then {mid:.2} then {far:.2} — it is \
+             not fading with distance"
+        );
+        assert!(away > 0.98, "the shadow reached the far side of the image");
     }
 
     /// Blur and Fill hide information rather than decorate it, so they stay

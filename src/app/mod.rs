@@ -77,6 +77,8 @@ pub(crate) const SWATCH_PX: u32 = 56;
 /// How far a duplicated shape lands from the one it was copied from, in
 /// preview points — enough to read as two shapes without leaving the picture.
 const DUPLICATE_OFFSET: f32 = 16.0;
+/// How far the shadow reaches, as a multiple of the rim it follows.
+const SHADOW_OF_RIM: f32 = 1.8;
 
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum Mode {
@@ -277,6 +279,10 @@ pub struct ShotrApp {
     pub(crate) annot_cover: crate::annotate::Cover,
     pub(crate) annot_underline: bool,
     pub(crate) annot_align: crate::annotate::TextAlign,
+    /// The white rim, in shot pixels. Off for every tool but the arrow, which
+    /// is the one most often dropped on top of whatever is underneath.
+    pub(crate) annot_border: f32,
+    pub(crate) annot_border_color: Rgba8,
     /// Where the screenshot sits inside the last preview render.
     pub(crate) preview_geom: Geometry,
 
@@ -431,6 +437,8 @@ impl ShotrApp {
             annot_cover: crate::annotate::Cover::Blur,
             annot_underline: false,
             annot_align: crate::annotate::TextAlign::Left,
+            annot_border: 0.0,
+            annot_border_color: [255, 255, 255, 255],
             preview_geom: Geometry::default(),
             ocr_words: Vec::new(),
             ocr_findings: Vec::new(),
@@ -701,6 +709,12 @@ impl ShotrApp {
         layer.cover = self.annot_cover;
         layer.underline = self.annot_underline;
         layer.align = self.annot_align;
+        layer.border = self.annot_border;
+        layer.border_color = self.annot_border_color;
+        // One dial, not two. The rim and the shadow are the same idea — keep
+        // the shape legible on a background it was not drawn for — and a rim
+        // with no shadow under it reads as a sticker that has not been cut out.
+        layer.shadow = self.annot_border * SHADOW_OF_RIM;
         layer
     }
 
