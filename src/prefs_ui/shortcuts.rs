@@ -41,6 +41,7 @@ fn label(action: Action) -> &'static str {
         Action::Full => t("Capture every screen"),
         Action::RegionCopy => t("Copy a region"),
         Action::FullCopy => t("Copy every screen"),
+        Action::RegionPin => t("Pin a region"),
         Action::Hub => t("Open recent shots"),
     }
 }

@@ -68,6 +68,12 @@ impl ksni::Tray for ShotrTray {
                 ..Default::default()
             }
             .into(),
+            StandardItem {
+                label: t("Pin a region…").into(),
+                activate: Box::new(|t: &mut Self| t.send(Command::CaptureRegionPin)),
+                ..Default::default()
+            }
+            .into(),
             SubMenu {
                 label: t("Capture a whole screen").into(),
                 submenu: screen_items(),

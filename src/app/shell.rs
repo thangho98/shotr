@@ -433,6 +433,17 @@ impl ShotrApp {
             {
                 self.copy_and_close(ctx);
             }
+            // No shortcut on the label, because the pin's own keys belong to the
+            // pin window and the one that starts a pin is global, bound in
+            // Preferences. Like Copy, this leaves: the pin *is* the shot now, and
+            // an editor left open behind it is a second copy of the same picture.
+            if ui
+                .button(t("Pin"))
+                .on_hover_text(t("Keep this shot floating above other windows"))
+                .clicked()
+            {
+                self.pin_and_close(ctx);
+            }
             separator(ui);
             if glyph_button(ui, Glyph::Redo, self.undo.can_redo())
                 .on_hover_text(t("Redo"))

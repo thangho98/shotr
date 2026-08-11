@@ -163,7 +163,7 @@ impl FromStr for Hotkey {
     }
 }
 
-/// The five things that can carry a binding.
+/// The six things that can carry a binding.
 ///
 /// Not every [`Command`] can: `CaptureMonitor` and `CaptureWindow` need a
 /// runtime argument, and `Quit` is not a capture. This names the subset and
@@ -176,15 +176,17 @@ pub enum Action {
     Full,
     RegionCopy,
     FullCopy,
+    RegionPin,
     Hub,
 }
 
 impl Action {
-    pub const ALL: [Action; 5] = [
+    pub const ALL: [Action; 6] = [
         Action::Region,
         Action::Full,
         Action::RegionCopy,
         Action::FullCopy,
+        Action::RegionPin,
         Action::Hub,
     ];
 
@@ -194,6 +196,7 @@ impl Action {
             Action::Full => Command::CaptureFull,
             Action::RegionCopy => Command::CaptureRegionCopy,
             Action::FullCopy => Command::CaptureFullCopy,
+            Action::RegionPin => Command::CaptureRegionPin,
             Action::Hub => Command::History,
         }
     }
@@ -313,7 +316,7 @@ pub fn bindings(stored: &[(Action, String)]) -> Vec<(Action, Hotkey)> {
 /// The combination macOS uses for the same job, which is where an offer starts.
 fn familiar(action: Action) -> &'static str {
     match action {
-        Action::Region | Action::RegionCopy => "Cmd+Shift+4",
+        Action::Region | Action::RegionCopy | Action::RegionPin => "Cmd+Shift+4",
         Action::Full | Action::FullCopy => "Cmd+Shift+3",
         Action::Hub => "Cmd+Shift+5",
     }

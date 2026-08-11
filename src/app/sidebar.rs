@@ -169,6 +169,7 @@ impl ShotrApp {
         }
 
         let mut open: Option<std::path::PathBuf> = None;
+        let mut pin: Option<std::path::PathBuf> = None;
         egui::ScrollArea::horizontal()
             .id_salt("history")
             .max_height(90.0)
@@ -192,18 +193,30 @@ impl ShotrApp {
                         let scale = 72.0 / size.y.max(1.0);
                         let image =
                             egui::Image::new(egui::load::SizedTexture::new(tex.id(), size * scale));
-                        if ui
+                        let thumb = ui
                             .add(egui::Button::image(image).corner_radius(4))
-                            .clicked()
-                        {
+                            .on_hover_text(t("Click to open. Right-click to pin."));
+                        if thumb.clicked() {
                             open = Some(self.history[i].image.clone());
                         }
+                        // A secondary action on a thumbnail, rather than a second
+                        // button per row: the strip is 72px tall and a row of
+                        // paired buttons would halve the number of shots visible.
+                        thumb.context_menu(|ui| {
+                            if ui.button(t("Pin to screen")).clicked() {
+                                pin = Some(self.history[i].image.clone());
+                                ui.close();
+                            }
+                        });
                     }
                 });
             });
 
         if let Some(path) = open {
             self.open_image(&path);
+        }
+        if let Some(path) = pin {
+            self.pin_shot(Some(&path));
         }
     }
 

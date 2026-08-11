@@ -53,6 +53,9 @@ pub enum Command {
     CaptureRegionCopy,
     /// Every monitor at once, beautified and copied, no editor.
     CaptureFullCopy,
+    /// A region, pinned to the screen as it was captured — no background, no
+    /// editor. The pin is a window of its own that outlives this one.
+    CaptureRegionPin,
     /// One monitor whole, straight to the editor.
     CaptureMonitor(usize),
     /// One window, straight to the editor. The identifier is empty on macOS,
@@ -78,6 +81,7 @@ impl Command {
             Command::CaptureFullCopy => {
                 vec!["--capture".into(), "--full".into(), "--copy".into()]
             }
+            Command::CaptureRegionPin => vec!["--capture".into(), "--pin".into()],
             Command::CaptureMonitor(i) => vec![
                 "--capture".into(),
                 "--full".into(),
@@ -110,6 +114,7 @@ mod tests {
             Command::CaptureFull,
             Command::CaptureRegionCopy,
             Command::CaptureFullCopy,
+            Command::CaptureRegionPin,
             Command::CaptureMonitor(2),
             Command::CaptureWindow("42".into()),
             Command::OpenFile,

@@ -9,6 +9,7 @@ pub mod i18n;
 pub mod ipc;
 pub mod notify;
 pub mod ocr;
+pub mod pin;
 pub mod prefs_ui;
 pub mod render;
 pub mod settings;

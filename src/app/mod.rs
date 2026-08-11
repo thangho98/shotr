@@ -303,6 +303,11 @@ pub struct ShotrApp {
     /// Apple's overlay hands back a finished region, so that copy happens
     /// before any window exists.
     pub copy_on_finish: bool,
+    /// `--pin` where the picker is shotr's own window, for the same reason
+    /// [`Self::copy_on_finish`] exists — and with one extra: a pin cannot be
+    /// opened from inside this process at all, so this hands the shot to a fresh
+    /// one and closes.
+    pub pin_on_finish: bool,
     /// Background colour detected in the current screenshot, for the Inset UI.
     pub(crate) detected_inset: Option<Rgba8>,
     /// Which sidebar group is unfolded.
@@ -428,6 +433,7 @@ impl ShotrApp {
             picking_fullscreen: matches!(start, Start::Picker(_)),
             hub: matches!(start, Start::History),
             copy_on_finish: false,
+            pin_on_finish: false,
             detected_inset: None,
             turn_from: None,
             detached_layer: None,
@@ -956,6 +962,44 @@ impl ShotrApp {
         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
     }
 
+    /// Hand `shot_full` to a pin, through a file written fresh every time.
+    ///
+    /// Deliberately *not* the newest history entry. That shortcut looked free and
+    /// pinned the wrong image: history holds this shot only where shotr's own
+    /// picker ran and `finish_selection` recorded it, while on macOS a region
+    /// arrives from Apple's overlay as `Start::Editor`, which records nothing — so
+    /// the newest entry was a shot from an earlier session, and that is what
+    /// appeared on screen.
+    fn start_pin(&self) -> Result<(), String> {
+        crate::pin::to_temp(&self.shot_full).and_then(|p| crate::pin::spawn(&p))
+    }
+
+    /// Pin the raw shot and stay open. Pinning is not leaving: the reason to pin
+    /// from the editor is usually to keep working with the shot in view.
+    pub(crate) fn pin_shot(&mut self, path: Option<&std::path::Path>) {
+        let started = match path {
+            Some(p) => crate::pin::spawn(p),
+            None => self.start_pin(),
+        };
+        self.status = match started {
+            Ok(()) => t("Pinned to the screen.").into(),
+            Err(e) => e,
+        };
+    }
+
+    /// Hand the shot to a pin of its own and close this window.
+    ///
+    /// Used by `--capture --pin` on the platforms where the picker is shotr's own
+    /// window, so the region is not known until the selection is made here.
+    pub(crate) fn pin_and_close(&mut self, ctx: &egui::Context) {
+        match self.start_pin() {
+            Ok(()) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+            // Staying open is the only way to say so: this window has a status
+            // line and the pin that failed to start has nothing at all.
+            Err(e) => self.status = e,
+        }
+    }
+
     // ---------------------------------------------------------------- presets
 
     pub(crate) fn save_preset(&mut self) {
@@ -995,6 +1039,13 @@ impl eframe::App for ShotrApp {
         if self.copy_on_finish && self.mode == Mode::Edit {
             self.copy_on_finish = false;
             self.copy_and_close(&ctx);
+            return;
+        }
+
+        // The same hand-off, for `--capture --pin`.
+        if self.pin_on_finish && self.mode == Mode::Edit {
+            self.pin_on_finish = false;
+            self.pin_and_close(&ctx);
             return;
         }
 
@@ -1201,7 +1252,7 @@ fn copy_requested(events: &[egui::Event], frame_shift: bool) -> Option<CopyWhat>
 /// frame reporting NONE while a debug build, slow enough to split it over two
 /// frames, worked. That difference is what made this look like a signing or
 /// install problem for an afternoon.
-fn shortcut(events: &[egui::Event], key: egui::Key, shift: Option<bool>) -> bool {
+pub(crate) fn shortcut(events: &[egui::Event], key: egui::Key, shift: Option<bool>) -> bool {
     events.iter().any(|e| {
         matches!(
             e,

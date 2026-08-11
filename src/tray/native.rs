@@ -203,6 +203,8 @@ fn menu() -> Result<(Menu, HashMap<MenuId, Command>), Box<dyn std::error::Error>
 
     let region = MenuItem::new(t("Capture a region…"), true, None);
     actions.insert(region.id().clone(), Command::CaptureRegion);
+    let pin = MenuItem::new(t("Pin a region…"), true, None);
+    actions.insert(pin.id().clone(), Command::CaptureRegionPin);
     let open = MenuItem::new(t("Open image…"), true, None);
     actions.insert(open.id().clone(), Command::OpenFile);
     let history = MenuItem::new(t("Recent shots…"), true, None);
@@ -257,6 +259,7 @@ fn menu() -> Result<(Menu, HashMap<MenuId, Command>), Box<dyn std::error::Error>
 
     menu.append_items(&[
         &region,
+        &pin,
         &screens,
         &window_entry,
         &PredefinedMenuItem::separator(),

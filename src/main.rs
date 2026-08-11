@@ -19,6 +19,7 @@ use shotr::daemon;
 use shotr::export;
 use shotr::i18n::t;
 use shotr::notify;
+use shotr::pin;
 use shotr::render;
 use shotr::settings::{Prefs, Style};
 use shotr::winlist;
@@ -33,6 +34,8 @@ shotr — chụp và làm đẹp ảnh màn hình
     shotr --capture --window ID   Chụp một cửa sổ, vào thẳng trình sửa
     shotr --capture --copy        Chụp vùng, làm đẹp, copy luôn — không mở cửa sổ
     shotr --capture --full --copy Chụp hết, làm đẹp, copy luôn
+    shotr --capture --pin         Chụp vùng rồi ghim ảnh gốc nổi trên màn hình
+    shotr --pin FILE     Ghim một ảnh có sẵn, đúng kích thước gốc
     shotr --open [FILE]  Mở một ảnh có sẵn
     shotr --clipboard    Mở ảnh đang có trong clipboard
     shotr --history      Mở danh sách ảnh chụp gần đây
@@ -62,6 +65,23 @@ fn arg_after<'a>(args: &'a [String], flag: &str) -> Option<&'a String> {
 /// `--monitor N`, if given and a number.
 fn monitor_arg(args: &[String]) -> Option<usize> {
     arg_after(args, "--monitor").and_then(|v| v.parse().ok())
+}
+
+/// The file to pin, if one was named. A flag is not a filename: `shotr --pin
+/// --capture` means "capture, then pin", not "pin a file called `--capture`".
+fn pin_path(args: &[String]) -> Option<&String> {
+    arg_after(args, "--pin").filter(|v| !v.starts_with("--"))
+}
+
+/// `--pin` with no file named only means something alongside `--capture` — the
+/// same trade [`copy_flag`] makes, and for the same reason: on its own there is
+/// nothing to pin, and accepting it would exit having silently done nothing.
+fn pin_flag(args: &[String]) -> Result<bool, ()> {
+    let has = |flag: &str| args.iter().any(|a| a == flag);
+    match (has("--pin"), pin_path(args).is_some(), has("--capture")) {
+        (true, false, false) => Err(()),
+        (pin, _, _) => Ok(pin),
+    }
 }
 
 /// `--copy` only means something alongside `--capture`. On its own there is
@@ -185,6 +205,27 @@ fn main() -> eframe::Result {
         return shotr::prefs_ui::run();
     }
 
+    // Nor does pinning a file that is already on disk.
+    if let Some(path) = pin_path(&args) {
+        return match image::open(path) {
+            Ok(img) => pin::run(img.to_rgba8(), Some(path.into())),
+            Err(e) => {
+                eprintln!("Could not open {path}: {e}");
+                Ok(())
+            }
+        };
+    }
+
+    // Bare `--pin` has to ride along with a capture; this is what stops it
+    // reaching the daemon branch below and starting the tray instead.
+    let pin = match pin_flag(&args) {
+        Ok(pin) => pin,
+        Err(()) => {
+            eprintln!("--pin needs either a file to pin or --capture to take one.");
+            return Ok(());
+        }
+    };
+
     // Before the daemon branch below, because `--copy` names no window and
     // would otherwise fall through it and start the tray — the silent nothing
     // that `Command::args` has its own test to prevent.
@@ -201,7 +242,7 @@ fn main() -> eframe::Result {
     // screenshot is for no window to exist when the shutter fires. Windows and
     // macOS could hide a window instead, but a tray that is only there on one
     // of the three platforms is a worse deal than one capture path everywhere.
-    let opens_a_window = ["--capture", "--open", "--clipboard", "--history"]
+    let opens_a_window = ["--capture", "--open", "--clipboard", "--history", "--pin"]
         .iter()
         .any(|f| has(f));
     if !opens_a_window {
@@ -260,11 +301,38 @@ fn main() -> eframe::Result {
             );
         } else if let Start::Editor(shot) | Start::Window(shot) = &start {
             copy_beautified(shot);
-            return Ok(());
+            // `--copy --pin` asks for both, and the pin is a window: leaving here
+            // would honour the first flag and drop the second in silence.
+            if !pin {
+                return Ok(());
+            }
         } else {
             copy_on_finish = true;
         }
     }
+
+    // `--pin` is the same shape as `--copy`: it can leave the editor out only
+    // once the image is final, which every source manages except shotr's own
+    // region picker. There the pin waits for the selection to be made — and then
+    // a *fresh process* opens it, because one eframe app cannot start another and
+    // because a pin has to outlive the window that asked for it.
+    //
+    // Redaction is not a reason to open the editor here, unlike `--copy`: a pin
+    // is not an export. Nothing is saved and nothing leaves the machine.
+    let mut pin_on_finish = false;
+    let start = if pin {
+        match start {
+            // No path to carry: this shot has never been a file. The pin writes
+            // one only if the user asks for the editor.
+            Start::Editor(shot) | Start::Window(shot) => return pin::run(shot, None),
+            other => {
+                pin_on_finish = true;
+                other
+            }
+        }
+    } else {
+        start
+    };
 
     // The region picker covers the screen and shows the shot at 1:1, so it
     // looks like you are selecting on the live desktop. macOS never reaches
@@ -305,6 +373,7 @@ fn main() -> eframe::Result {
         Box::new(move |cc| {
             let mut app = ShotrApp::new(cc, start, source, views.clone());
             app.copy_on_finish = copy_on_finish;
+            app.pin_on_finish = pin_on_finish;
             Ok(Box::new(app))
         }),
     )
@@ -312,7 +381,7 @@ fn main() -> eframe::Result {
 
 #[cfg(test)]
 mod arg_tests {
-    use super::{arg_after, copy_flag, monitor_arg};
+    use super::{arg_after, copy_flag, monitor_arg, pin_flag, pin_path};
 
     fn args(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| s.to_string()).collect()
@@ -369,6 +438,55 @@ mod arg_tests {
             Ok(false),
             "a capture without --copy must still open the editor"
         );
+    }
+
+    #[test]
+    fn a_named_file_is_what_gets_pinned() {
+        let a = args(&["--pin", "/tmp/shot.png"]);
+        assert_eq!(
+            pin_path(&a).map(String::as_str),
+            Some("/tmp/shot.png"),
+            "losing the path here pins nothing and the command looks dead"
+        );
+        assert_eq!(pin_flag(&a), Ok(true));
+    }
+
+    #[test]
+    fn a_flag_after_pin_is_not_a_filename() {
+        // `shotr --pin --capture` means "capture, then pin". Reading the flag as
+        // a path would try to open a file called `--capture` and give up.
+        let a = args(&["--pin", "--capture"]);
+        assert_eq!(pin_path(&a), None);
+        assert_eq!(pin_flag(&a), Ok(true));
+    }
+
+    #[test]
+    fn pin_needs_something_to_pin() {
+        assert_eq!(
+            pin_flag(&args(&["--pin"])),
+            Err(()),
+            "bare `--pin` would otherwise fall through to the daemon branch and \
+             start the tray, which looks exactly like a dead shortcut"
+        );
+        assert_eq!(
+            pin_flag(&args(&["--capture", "--pin"])),
+            Ok(true),
+            "this is the tray's own entry, and the flag order it uses"
+        );
+        assert_eq!(
+            pin_flag(&args(&["--capture"])),
+            Ok(false),
+            "a capture without --pin must still open the editor"
+        );
+    }
+
+    #[test]
+    fn pin_rides_along_with_copy() {
+        // Both are asked for, so both must happen: `--copy` returning early
+        // would honour one flag and drop the other in silence.
+        let a = args(&["--capture", "--copy", "--pin"]);
+        assert_eq!(copy_flag(&a), Ok(true));
+        assert_eq!(pin_flag(&a), Ok(true));
     }
 
     #[test]
