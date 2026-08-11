@@ -498,6 +498,28 @@ same trap again — so they are not drawn at all rather than drawn dead. Paint's
 "Width" went the same way: it means a brush, and paint here is a rectangular
 marker.
 
+**There are two arrows, and that is the point.** `Tool::Arrow` is one solid
+silhouette with locked proportions — a drag says where it points and how big it
+is, never how fat — which is the mark a marker pen makes. `Tool::Line` is the
+stroked pointer shotr drew before, with a settable width and an open, solid or
+dashed head. Neither replaces the other.
+
+Three things follow from the arrow being a polygon. Its outline is *generated*
+from one spine with a signed bend rather than digitised from an SVG: three
+fixed forms need three outlines, and one bezier gives all three with the
+straight one being bend zero — hand-listed points would be the same shapes with
+a transcription error waiting in them. It is not turnable, because its
+direction *is* its geometry and a rotate knob would be a second control for the
+same thing. And it has no stroke slider, for the same reason.
+
+The stand-in cannot draw it the easy way: epaint's `convex_polygon` means what
+it says, and the arrow is concave at the notch where the head meets the shaft.
+What saves it is that the outline is two walks of the same spine, so point `i`
+pairs with `n-1-i` and the shape falls into quads that are each convex, share
+edges, and leave no seam in one colour. The rim is that strip stroked
+underneath — the seams are covered by the fill on top, leaving only the outer
+boundary.
+
 **The rim and the shadow come off the same distance field, in three passes.**
 A red arrow on a red part of the picture disappears, which is what the white
 rim is for, and a rim with nothing under it reads as a sticker that has not

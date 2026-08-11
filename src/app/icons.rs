@@ -234,6 +234,26 @@ pub fn draw(painter: &egui::Painter, rect: egui::Rect, tool: Tool, color: egui::
             ));
         }
         Tool::Arrow => {
+            // A solid silhouette, because that is what the tool now draws: a
+            // stroked glyph here would promise the line the Line tool draws.
+            let shaft = 0.11;
+            painter.add(egui::Shape::convex_polygon(
+                vec![
+                    at(0.0, 0.62 - shaft),
+                    at(0.52, 0.62 - shaft),
+                    at(0.52, 0.62 + shaft),
+                    at(0.0, 0.62 + shaft),
+                ],
+                color,
+                egui::Stroke::NONE,
+            ));
+            painter.add(egui::Shape::convex_polygon(
+                vec![at(1.0, 0.0), at(0.42, 0.30), at(0.72, 0.90)],
+                color,
+                egui::Stroke::NONE,
+            ));
+        }
+        Tool::Line => {
             let a = at(0.0, 1.0);
             let b = at(1.0, 0.0);
             painter.line_segment([a, b], stroke);

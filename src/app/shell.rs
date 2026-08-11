@@ -18,7 +18,7 @@ use eframe::egui;
 use super::icons::Glyph;
 use super::theme;
 use super::{Mode, SIDEBAR_W, ShotrApp, Zoom, controls};
-use crate::annotate::{Cover, Head, Layer, TextAlign, Tool};
+use crate::annotate::{ArrowForm, Cover, Head, Layer, TextAlign, Tool};
 use crate::export;
 use crate::i18n::{t, tf};
 
@@ -32,13 +32,14 @@ use crate::i18n::{t, tf};
 ///
 /// One list, used by the pill, by the keyboard handler and by the shortcut
 /// list in Preferences — so a tool cannot gain a button without gaining a key.
-pub(super) const TOOLS: [(Tool, char); 7] = [
+pub(super) const TOOLS: [(Tool, char); 8] = [
     (Tool::Arrow, '1'),
     (Tool::Text, '2'),
     (Tool::Rect, '3'),
     (Tool::Ellipse, '4'),
-    (Tool::Blur, '5'),
-    (Tool::Highlight, '6'),
+    (Tool::Line, '5'),
+    (Tool::Blur, '6'),
+    (Tool::Highlight, '7'),
     (Tool::Select, '`'),
 ];
 
@@ -50,11 +51,19 @@ const OPT_PAD_X: f32 = 6.0;
 /// Between the tool row and the hairline under it.
 const HAIRLINE_GAP: f32 = 5.0;
 
-/// The arrow heads, in the order the row offers them.
+/// The arrow heads, in the order the row offers them. These belong to the line
+/// shape, which is where the old stroked arrow went.
 const HEADS: [(Head, &str); 3] = [
     (Head::Solid, "Solid head"),
     (Head::Open, "Open head"),
     (Head::Dashed, "Dashed"),
+];
+
+/// The three arrows, in the order the row offers them.
+const ARROWS: [(ArrowForm, &str); 3] = [
+    (ArrowForm::Straight, "Straight"),
+    (ArrowForm::BendLeft, "Bend left"),
+    (ArrowForm::BendRight, "Bend right"),
 ];
 
 /// The two ways of hiding what is under a redaction.
@@ -720,11 +729,11 @@ impl ShotrApp {
             Tool::Arrow => {
                 self.swatches(ui);
                 controls::divider(ui);
-                controls::slider(ui, t("Stroke"), &mut self.annot_stroke, 1.0..=40.0, "");
-                controls::divider(ui);
-                for (head, name) in HEADS {
-                    if controls::pill(ui, t(name), self.annot_head == head).clicked() {
-                        self.annot_head = head;
+                // No stroke width: the arrow's proportions are locked, so its
+                // thickness comes from how far it was dragged and nothing else.
+                for (form, name) in ARROWS {
+                    if controls::pill(ui, t(name), self.annot_arrow == form).clicked() {
+                        self.annot_arrow = form;
                     }
                 }
                 self.rim_options(ui);
@@ -742,6 +751,18 @@ impl ShotrApp {
                 for align in [TextAlign::Left, TextAlign::Centre, TextAlign::Right] {
                     if controls::align_toggle(ui, align, self.annot_align == align).clicked() {
                         self.annot_align = align;
+                    }
+                }
+                self.rim_options(ui);
+            }
+            Tool::Line => {
+                self.swatches(ui);
+                controls::divider(ui);
+                controls::slider(ui, t("Stroke"), &mut self.annot_stroke, 1.0..=40.0, "");
+                controls::divider(ui);
+                for (head, name) in HEADS {
+                    if controls::pill(ui, t(name), self.annot_head == head).clicked() {
+                        self.annot_head = head;
                     }
                 }
                 self.rim_options(ui);
@@ -821,7 +842,12 @@ impl ShotrApp {
     /// of any one tool.
     fn rim_options(&mut self, ui: &mut egui::Ui) {
         controls::divider(ui);
-        controls::slider(ui, t("Rim"), &mut self.annot_border, 0.0..=24.0, "");
+        let rim = if self.tool == Tool::Arrow {
+            &mut self.annot_arrow_rim
+        } else {
+            &mut self.annot_border
+        };
+        controls::slider(ui, t("Rim"), rim, 0.0..=24.0, "");
         if controls::fill_chip(
             ui,
             self.annot_border > 0.5,
@@ -1058,7 +1084,7 @@ fn pill_rect(canvas: egui::Rect, width: f32, grow: f32) -> egui::Rect {
 /// Select and a drawing tool shifted every button sideways by half the options
 /// group. Now the options live under the buttons and cannot reach them.
 fn tool_row_width() -> f32 {
-    super::icons::BUTTON * 7.0 + SEP_W + theme::PILL_GAP * 7.0
+    super::icons::BUTTON * 8.0 + SEP_W + theme::PILL_GAP * 8.0
 }
 
 /// How wide the capsule is drawn: whatever the tool in hand needs.
@@ -1133,8 +1159,8 @@ fn row_items(tool: Tool) -> Vec<Item> {
     };
     match tool {
         Tool::Arrow => {
-            let mut v = vec![Item::Swatches, Item::Divider, stroke(), Item::Divider];
-            v.extend(HEADS.map(|(_, name)| Item::Pill(t(name))));
+            let mut v = vec![Item::Swatches, Item::Divider];
+            v.extend(ARROWS.map(|(_, name)| Item::Pill(t(name))));
             rim(&mut v);
             v
         }
@@ -1151,6 +1177,12 @@ fn row_items(tool: Tool) -> Vec<Item> {
                 Item::Square,
                 Item::Square,
             ];
+            rim(&mut v);
+            v
+        }
+        Tool::Line => {
+            let mut v = vec![Item::Swatches, Item::Divider, stroke(), Item::Divider];
+            v.extend(HEADS.map(|(_, name)| Item::Pill(t(name))));
             rim(&mut v);
             v
         }
@@ -1338,7 +1370,7 @@ mod tests {
         assert!(w > 0.0);
         assert_eq!(
             w,
-            super::super::icons::BUTTON * 7.0 + SEP_W + theme::PILL_GAP * 7.0,
+            super::super::icons::BUTTON * 8.0 + SEP_W + theme::PILL_GAP * 8.0,
             "seven buttons, one separator and the gaps between them"
         );
     }
@@ -1479,14 +1511,14 @@ mod tests {
         assert_eq!(keys.len(), TOOLS.len(), "two tools share a key");
     }
 
-    /// The six drawing tools sit on `1`–`6` in the order they are shown, and
+    /// The drawing tools sit on the digits in the order they are shown, and
     /// Select takes the key beside them rather than the far end of the row.
     #[test]
-    fn the_drawing_tools_run_1_to_6_and_select_sits_next_to_them() {
-        let drawing: Vec<char> = TOOLS[..6].iter().map(|(_, k)| *k).collect();
-        assert_eq!(drawing, vec!['1', '2', '3', '4', '5', '6']);
+    fn the_drawing_tools_run_along_the_digits_and_select_sits_next_to_them() {
+        let drawing: Vec<char> = TOOLS[..7].iter().map(|(_, k)| *k).collect();
+        assert_eq!(drawing, vec!['1', '2', '3', '4', '5', '6', '7']);
         assert_eq!(
-            TOOLS[6],
+            TOOLS[7],
             (Tool::Select, '`'),
             "Select must stay on the key left of 1 — it is reached far more \
              often than any one drawing tool"
@@ -1497,9 +1529,9 @@ mod tests {
     /// Select on its own behind a separator.
     #[test]
     fn select_is_the_last_tool_in_the_pill() {
-        assert_eq!(TOOLS[6].0, Tool::Select, "Select moved out of last place");
+        assert_eq!(TOOLS[7].0, Tool::Select, "Select moved out of last place");
         assert!(
-            TOOLS[..6].iter().all(|(t, _)| *t != Tool::Select),
+            TOOLS[..7].iter().all(|(t, _)| *t != Tool::Select),
             "Select appears twice"
         );
     }

@@ -210,6 +210,7 @@ static VI: &[(&str, &str)] = &[
     ("Layout", "Bố cục"),
     ("Leave the inset off rather than falling back to a plain colour.", "Bỏ luôn viền trong thay vì tô một màu mặc định."),
     ("Light", "Sáng"),
+    ("Line", "Đường thẳng"),
     ("Logo image", "Ảnh logo"),
     ("Maximum compression (slower)", "Nén tối đa (chậm hơn)"),
     ("Monitor {n}", "Màn hình {n}"),

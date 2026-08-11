@@ -1126,6 +1126,27 @@ fn dashes(a: [f32; 2], b: [f32; 2], gap: f32) -> Vec<([f32; 2], [f32; 2])> {
     out
 }
 
+/// Fill a closed outline that may be concave.
+///
+/// epaint's `convex_polygon` is exactly what its name says, and the arrow has a
+/// notch where the head meets the shaft. Fanning triangles from the centroid
+/// would fail on the same notch. What does work here is that the outline is
+/// *two walks of the same spine*: point `i` on one side pairs with point
+/// `n-1-i` on the other, so the shape falls apart into quads that are each
+/// convex, share their edges, and leave no seam once drawn in one colour.
+fn fill_concave(painter: &egui::Painter, pts: &[egui::Pos2], color: egui::Color32) {
+    let n = pts.len();
+    for i in 0..n / 2 {
+        let (a, b) = (pts[i], pts[n - 1 - i]);
+        let (c, d) = (pts[i + 1], pts[n - 2 - i]);
+        painter.add(egui::Shape::convex_polygon(
+            vec![a, c, d, b],
+            color,
+            egui::Stroke::NONE,
+        ));
+    }
+}
+
 /// How far one shot pixel travels on screen.
 fn screen_unit(to_screen: &dyn Fn([f32; 2]) -> egui::Pos2) -> f32 {
     (to_screen([1.0, 0.0]).x - to_screen([0.0, 0.0]).x)
@@ -1172,7 +1193,31 @@ fn paint_layer_preview(
     let rim = layer.border * screen_unit(to_screen);
 
     match layer.kind {
-        Tool::Arrow | Tool::Rect | Tool::Ellipse => {
+        Tool::Arrow => {
+            // The bake is one filled silhouette, so the stand-in has to be one
+            // too. epaint cannot fill a concave path, and the arrow is concave
+            // where the head meets the shaft — so it goes down as a strip of
+            // convex quads plus the head, which share edges and read as one
+            // shape. The rim is the same strip drawn underneath with a stroke:
+            // the seams between quads are covered by the fill on top, leaving
+            // only the outer boundary showing.
+            let pts: Vec<egui::Pos2> = crate::annotate::arrow_points(layer)
+                .into_iter()
+                .map(&to_screen)
+                .collect();
+            if pts.len() >= 3 {
+                let c = layer.border_color;
+                let rim_ink = egui::Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3]);
+                if rim > 0.5 {
+                    painter.add(egui::Shape::closed_line(
+                        pts.clone(),
+                        egui::Stroke::new(rim * 2.0, rim_ink),
+                    ));
+                }
+                fill_concave(painter, &pts, color);
+            }
+        }
+        Tool::Line | Tool::Rect | Tool::Ellipse => {
             // The rim is the same shape a stroke wider, drawn underneath — the
             // exporter gets it from one distance field, so this is the closest
             // an outline-based painter can come. There is no shadow here at

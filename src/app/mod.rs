@@ -79,6 +79,8 @@ pub(crate) const SWATCH_PX: u32 = 56;
 const DUPLICATE_OFFSET: f32 = 16.0;
 /// How far the shadow reaches, as a multiple of the rim it follows.
 const SHADOW_OF_RIM: f32 = 1.8;
+/// The rim an arrow starts with, in shot pixels.
+const ARROW_RIM: f32 = 5.0;
 
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum Mode {
@@ -276,12 +278,18 @@ pub struct ShotrApp {
     pub(crate) annot_filled: bool,
     pub(crate) annot_corner: f32,
     pub(crate) annot_head: crate::annotate::Head,
+    pub(crate) annot_arrow: crate::annotate::ArrowForm,
     pub(crate) annot_cover: crate::annotate::Cover,
     pub(crate) annot_underline: bool,
     pub(crate) annot_align: crate::annotate::TextAlign,
     /// The white rim, in shot pixels. Off for every tool but the arrow, which
     /// is the one most often dropped on top of whatever is underneath.
     pub(crate) annot_border: f32,
+    /// The arrow keeps its own, because it is the one tool whose default is not
+    /// zero — the shape is designed around a rim. Sharing the dial would mean
+    /// the slider reading 0 while the arrow drew 5, which is a control lying
+    /// about what it controls.
+    pub(crate) annot_arrow_rim: f32,
     pub(crate) annot_border_color: Rgba8,
     /// Where the screenshot sits inside the last preview render.
     pub(crate) preview_geom: Geometry,
@@ -434,10 +442,12 @@ impl ShotrApp {
             annot_filled: false,
             annot_corner: 0.0,
             annot_head: crate::annotate::Head::Solid,
+            annot_arrow: crate::annotate::ArrowForm::Straight,
             annot_cover: crate::annotate::Cover::Blur,
             annot_underline: false,
             annot_align: crate::annotate::TextAlign::Left,
             annot_border: 0.0,
+            annot_arrow_rim: ARROW_RIM,
             annot_border_color: [255, 255, 255, 255],
             preview_geom: Geometry::default(),
             ocr_words: Vec::new(),
@@ -706,15 +716,20 @@ impl ShotrApp {
         layer.filled = self.annot_filled;
         layer.corner = self.annot_corner;
         layer.head = self.annot_head;
+        layer.arrow = self.annot_arrow;
         layer.cover = self.annot_cover;
         layer.underline = self.annot_underline;
         layer.align = self.annot_align;
-        layer.border = self.annot_border;
+        layer.border = if tool == Tool::Arrow {
+            self.annot_arrow_rim
+        } else {
+            self.annot_border
+        };
         layer.border_color = self.annot_border_color;
         // One dial, not two. The rim and the shadow are the same idea — keep
         // the shape legible on a background it was not drawn for — and a rim
         // with no shadow under it reads as a sticker that has not been cut out.
-        layer.shadow = self.annot_border * SHADOW_OF_RIM;
+        layer.shadow = layer.border * SHADOW_OF_RIM;
         layer
     }
 
@@ -1387,6 +1402,7 @@ fn tool_key(label: char) -> Option<egui::Key> {
         '4' => egui::Key::Num4,
         '5' => egui::Key::Num5,
         '6' => egui::Key::Num6,
+        '7' => egui::Key::Num7,
         // Left of `1`, and the tool reached most often.
         '`' => egui::Key::Backtick,
         _ => return None,

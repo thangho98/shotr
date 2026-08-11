@@ -24,6 +24,10 @@ pub enum Tool {
     Arrow,
     Rect,
     Ellipse,
+    /// A stroked line, with or without a head. This is where the arrow that
+    /// used to be drawn from three capsules went when [`Tool::Arrow`] became a
+    /// solid silhouette.
+    Line,
     Text,
     Blur,
     Highlight,
@@ -34,10 +38,11 @@ pub enum Tool {
 }
 
 impl Tool {
-    pub const DRAWABLE: [Tool; 6] = [
+    pub const DRAWABLE: [Tool; 7] = [
         Tool::Arrow,
         Tool::Rect,
         Tool::Ellipse,
+        Tool::Line,
         Tool::Text,
         Tool::Blur,
         Tool::Highlight,
@@ -49,6 +54,7 @@ impl Tool {
             Tool::Arrow => t("Arrow"),
             Tool::Rect => t("Rectangle"),
             Tool::Ellipse => t("Ellipse"),
+            Tool::Line => t("Line"),
             Tool::Text => t("Text"),
             Tool::Blur => t("Blur"),
             Tool::Highlight => t("Paint"),
@@ -65,7 +71,8 @@ impl Tool {
     /// cover whole regions and Text has its own size, so showing them a stroke
     /// slider would be offering a control that does nothing.
     pub fn uses_stroke(self) -> bool {
-        matches!(self, Tool::Arrow | Tool::Rect | Tool::Ellipse)
+        // Not the arrow: its thickness comes from its own proportions.
+        matches!(self, Tool::Line | Tool::Rect | Tool::Ellipse)
     }
 }
 
@@ -93,6 +100,7 @@ pub struct Layer {
     /// Corner radius, in original screenshot pixels. 0 is a sharp corner.
     pub corner: f32,
     pub head: Head,
+    pub arrow: ArrowForm,
     pub cover: Cover,
     pub underline: bool,
     pub align: TextAlign,
@@ -106,6 +114,39 @@ pub struct Layer {
     pub border_color: Rgba8,
     /// How far the shadow feathers out, in original screenshot pixels.
     pub shadow: f32,
+}
+
+/// Which of the three arrows this is.
+///
+/// The forms are fixed and the proportions are locked: a drag sets where the
+/// arrow points and how big it is, never how fat it is. That is what makes it
+/// read as one mark from a marker pen rather than a line with a decoration on
+/// the end, and it is why the tool has no stroke width.
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Debug, Default)]
+pub enum ArrowForm {
+    #[default]
+    Straight,
+    /// Bending to the left of the way it points.
+    BendLeft,
+    BendRight,
+}
+
+impl ArrowForm {
+    pub const ALL: [ArrowForm; 3] = [
+        ArrowForm::Straight,
+        ArrowForm::BendLeft,
+        ArrowForm::BendRight,
+    ];
+
+    /// How far the spine's control point sits off the straight line between
+    /// tail and tip, as a fraction of the arrow's length.
+    fn bend(self) -> f32 {
+        match self {
+            ArrowForm::Straight => 0.0,
+            ArrowForm::BendLeft => -0.30,
+            ArrowForm::BendRight => 0.30,
+        }
+    }
 }
 
 /// What sits at the far end of an arrow.
@@ -163,6 +204,7 @@ impl Layer {
             filled: false,
             corner: 0.0,
             head: Head::default(),
+            arrow: ArrowForm::default(),
             cover: Cover::default(),
             underline: false,
             align: TextAlign::default(),
@@ -191,7 +233,10 @@ impl Layer {
 
     /// Whether turning this tool means anything.
     pub fn turnable(kind: Tool) -> bool {
-        !matches!(kind, Tool::Blur | Tool::Fill | Tool::Select)
+        // The arrow is not here because its direction *is* its geometry: the
+        // drag from tail to tip already says which way it points, and a rotate
+        // knob would be a second control for the same thing.
+        !matches!(kind, Tool::Blur | Tool::Fill | Tool::Select | Tool::Arrow)
     }
 
     /// `p` brought back into the shape's own upright frame.
@@ -266,9 +311,19 @@ pub fn apply(img: &mut RgbaImage, layers: &[Layer], scale: f32, font: Option<&Fo
             corner: layer.corner * scale,
         };
         match layer.kind {
-            Tool::Arrow => draw_arrow(img, a, b, &ink, layer.head, scale),
+            Tool::Arrow => {
+                // Built in shot pixels and scaled here, so the outline is the
+                // same shape at preview size and at export size — the arrow's
+                // proportions are the whole point of it.
+                let pts: Vec<[f32; 2]> = arrow_points(layer)
+                    .into_iter()
+                    .map(|p| [p[0] * scale, p[1] * scale])
+                    .collect();
+                draw_arrow(img, &pts, &ink);
+            }
             Tool::Rect => draw_rect(img, a, b, &ink),
             Tool::Ellipse => draw_ellipse(img, a, b, &ink),
+            Tool::Line => draw_line(img, a, b, &ink, layer.head, scale),
             Tool::Highlight => draw_paint(img, a, b, layer.color, turn),
             Tool::Fill => draw_fill(img, a, b, layer.color),
             Tool::Blur => {
@@ -502,7 +557,152 @@ fn rasterise(
 
 // ------------------------------------------------------------------- drawing
 
-fn draw_arrow(img: &mut RgbaImage, a: [f32; 2], b: [f32; 2], ink: &Ink, head: Head, scale: f32) {
+/// The arrow's silhouette in its own frame: tail at the origin, tip at (1, 0),
+/// everything else scaled to that.
+///
+/// Generated rather than digitised from an SVG. Three fixed forms need three
+/// outlines, and one spine with a signed bend gives all three from the same
+/// twenty lines — a hand-listed set of points would be the same shapes with a
+/// transcription error waiting in them, and the straight arrow is just the one
+/// with no bend.
+fn arrow_outline(form: ArrowForm) -> Vec<[f32; 2]> {
+    /// Half the shaft's width.
+    const SHAFT: f32 = 0.055;
+    /// Half the head's width, at its base.
+    const HEAD_HALF: f32 = 0.17;
+    /// How much of the arrow's length the head takes.
+    const HEAD_LEN: f32 = 0.30;
+    const STEPS: usize = 40;
+
+    let bend = form.bend();
+    // A quadratic Bézier from tail to tip, pulled aside at the middle.
+    let spine = |t: f32| -> [f32; 2] {
+        let u = 1.0 - t;
+        [
+            2.0 * u * t * 0.5 + t * t,
+            2.0 * u * t * bend,
+        ]
+    };
+    let pts: Vec<[f32; 2]> = (0..=STEPS)
+        .map(|i| spine(i as f32 / STEPS as f32))
+        .collect();
+
+    // Walk the spine from the tip back until the head has had its length, so
+    // the head is the same size however far the spine bends.
+    let mut run = 0.0;
+    let mut neck = 0;
+    for i in (1..pts.len()).rev() {
+        let (dx, dy) = (pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]);
+        run += (dx * dx + dy * dy).sqrt();
+        if run >= HEAD_LEN {
+            neck = i - 1;
+            break;
+        }
+    }
+
+    let normal = |i: usize| -> [f32; 2] {
+        let (from, to) = (pts[i.saturating_sub(1)], pts[(i + 1).min(STEPS)]);
+        let (dx, dy) = (to[0] - from[0], to[1] - from[1]);
+        let len = (dx * dx + dy * dy).sqrt().max(f32::EPSILON);
+        [-dy / len, dx / len]
+    };
+
+    let mut out = Vec::with_capacity(neck * 2 + 5);
+    // Up one side of the shaft…
+    for (i, p) in pts.iter().enumerate().take(neck + 1) {
+        let n = normal(i);
+        out.push([p[0] + n[0] * SHAFT, p[1] + n[1] * SHAFT]);
+    }
+    // …round the head…
+    let n = normal(neck);
+    out.push([
+        pts[neck][0] + n[0] * HEAD_HALF,
+        pts[neck][1] + n[1] * HEAD_HALF,
+    ]);
+    out.push(pts[STEPS]);
+    out.push([
+        pts[neck][0] - n[0] * HEAD_HALF,
+        pts[neck][1] - n[1] * HEAD_HALF,
+    ]);
+    // …and back down the other side, so the two walks pair up point for point.
+    for (i, p) in pts.iter().enumerate().take(neck + 1).rev() {
+        let n = normal(i);
+        out.push([p[0] - n[0] * SHAFT, p[1] - n[1] * SHAFT]);
+    }
+    out
+}
+
+/// The arrow's outline placed in the picture: `a` is the tail, `b` the tip.
+///
+/// One uniform scale, so the arrow keeps its proportions however it is dragged
+/// — longer means bigger, never thinner.
+pub fn arrow_points(layer: &Layer) -> Vec<[f32; 2]> {
+    let (a, b) = (layer.a, layer.b);
+    let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+    let len = (dx * dx + dy * dy).sqrt();
+    if len < 1.0 {
+        return Vec::new();
+    }
+    let (ux, uy) = (dx / len, dy / len);
+    arrow_outline(layer.arrow)
+        .into_iter()
+        .map(|[u, v]| {
+            [
+                a[0] + (u * ux - v * uy) * len,
+                a[1] + (u * uy + v * ux) * len,
+            ]
+        })
+        .collect()
+}
+
+/// Signed distance to a closed polygon. Negative inside.
+///
+/// Crossing count for the sign, nearest edge for the magnitude. The arrow is
+/// not convex — the notch where the head meets the shaft — so none of the
+/// cheaper convex tests apply.
+fn sd_polygon(px: f32, py: f32, pts: &[[f32; 2]]) -> f32 {
+    let n = pts.len();
+    if n < 3 {
+        return f32::MAX;
+    }
+    let mut d = f32::MAX;
+    let mut inside = false;
+    let mut j = n - 1;
+    for i in 0..n {
+        let (pi, pj) = (pts[i], pts[j]);
+        d = d.min(sd_segment(px, py, pi, pj));
+        if (pi[1] > py) != (pj[1] > py) {
+            let x = (pj[0] - pi[0]) * (py - pi[1]) / (pj[1] - pi[1]) + pi[0];
+            if px < x {
+                inside = !inside;
+            }
+        }
+        j = i;
+    }
+    if inside { -d } else { d }
+}
+
+fn draw_arrow(img: &mut RgbaImage, pts: &[[f32; 2]], ink: &Ink) {
+    if pts.len() < 3 {
+        return;
+    }
+    let mut bounds = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
+    for p in pts {
+        bounds[0] = bounds[0].min(p[0]);
+        bounds[1] = bounds[1].min(p[1]);
+        bounds[2] = bounds[2].max(p[0]);
+        bounds[3] = bounds[3].max(p[1]);
+    }
+    rasterise_turned(img, bounds, ink, |px, py| sd_polygon(px, py, pts), 0.0);
+}
+
+/// A line, and whatever head it carries.
+///
+/// This is the arrow shotr drew before [`Tool::Arrow`] became a silhouette: a
+/// stroke you can set the width of, with an open, solid or dashed treatment.
+/// The two are different marks — this one is a technical pointer, that one is
+/// a marker pen — and both are worth having.
+fn draw_line(img: &mut RgbaImage, a: [f32; 2], b: [f32; 2], ink: &Ink, head: Head, scale: f32) {
     let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
     let len = (dx * dx + dy * dy).sqrt();
     if len < 1.0 {
@@ -511,14 +711,10 @@ fn draw_arrow(img: &mut RgbaImage, a: [f32; 2], b: [f32; 2], ink: &Ink, head: He
     let stroke = ink.stroke;
     // The floor is 10 *shot* pixels, so it has to be scaled with everything
     // else. A bare 10 here is 10 preview pixels in the preview and 10 export
-    // pixels in the export, which gave the same arrow two different heads.
+    // pixels in the export, which gave the same line two different heads.
     let reach = (stroke * 4.0).max(10.0 * scale).min(len);
     let along = dy.atan2(dx);
 
-    // Swept back from the tip at ±28°. The open head puts a barb here; the
-    // solid one puts a triangle's back corners here, so the two are the same
-    // width and swapping between them does not change how far the arrow
-    // reaches.
     let corner = |sign: f32| -> [f32; 2] {
         let t = along + std::f32::consts::PI + sign * 0.49;
         [b[0] + reach * t.cos(), b[1] + reach * t.sin()]
@@ -531,15 +727,12 @@ fn draw_arrow(img: &mut RgbaImage, a: [f32; 2], b: [f32; 2], ink: &Ink, head: He
     let x1 = a[0].max(b[0]).max(l[0]).max(r[0]) + pad;
     let y1 = a[1].max(b[1]).max(l[1]).max(r[1]) + pad;
 
-    // A solid head is wider than the shaft, so the shaft stops short of the
-    // tip: run it to the middle of the head's back edge instead. Otherwise the
-    // shaft's round cap pokes out past the point.
+    // A solid head is wider than the shaft, so the shaft stops at the middle of
+    // the head's back edge; otherwise its round cap pokes past the point.
     let neck = [(l[0] + r[0]) / 2.0, (l[1] + r[1]) / 2.0];
     let shaft: Vec<([f32; 2], [f32; 2])> = match head {
         Head::Open => vec![(a, b)],
         Head::Solid => vec![(a, neck)],
-        // Dashes twice their own length apart, so the gaps read as deliberate
-        // at any stroke width.
         Head::Dashed => dashes(a, neck, stroke * 2.0),
     };
 
@@ -554,7 +747,7 @@ fn draw_arrow(img: &mut RgbaImage, a: [f32; 2], b: [f32; 2], ink: &Ink, head: He
             }
             match head {
                 // The barbs are strokes like the shaft, so they join it with
-                // the same round cap and the whole arrow is one silhouette.
+                // the same round cap and the whole mark is one silhouette.
                 Head::Open => d
                     .min(sd_segment(px, py, b, l))
                     .min(sd_segment(px, py, b, r)),
@@ -567,7 +760,7 @@ fn draw_arrow(img: &mut RgbaImage, a: [f32; 2], b: [f32; 2], ink: &Ink, head: He
     );
 }
 
-/// A dashed line as a list of segments, `gap` long and `gap` apart.
+/// A dashed line as a list of segments, `gap` long and `gap` apart./// A dashed line as a list of segments, `gap` long and `gap` apart.
 fn dashes(a: [f32; 2], b: [f32; 2], gap: f32) -> Vec<([f32; 2], [f32; 2])> {
     let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
     let len = (dx * dx + dy * dy).sqrt();
@@ -1035,7 +1228,7 @@ mod tests {
     /// translation wearing a disguise.
     #[test]
     fn turning_a_shape_moves_its_ink_but_not_its_centre() {
-        for kind in [Tool::Rect, Tool::Ellipse, Tool::Arrow] {
+        for kind in [Tool::Rect, Tool::Ellipse, Tool::Line] {
             let mut upright = canvas();
             let mut turned = canvas();
             apply(&mut upright, &[shape(kind, 0.0)], 1.0, None);
@@ -1075,7 +1268,7 @@ mod tests {
     #[test]
     fn every_angle_renders_at_every_scale() {
         let font = crate::render::text::load_system_font().map(|(_, f)| f);
-        for kind in [Tool::Arrow, Tool::Rect, Tool::Ellipse, Tool::Text, Tool::Highlight] {
+        for kind in [Tool::Line, Tool::Rect, Tool::Ellipse, Tool::Text, Tool::Highlight] {
             for steps in 0..24 {
                 let angle = steps as f32 / 24.0 * std::f32::consts::TAU - std::f32::consts::PI;
                 for scale in [0.12_f32, 0.5, 1.0] {
@@ -1130,10 +1323,10 @@ mod tests {
     /// bitmap was being drawn into, which is not the same thing: the preview is
     /// drawn at a fraction of full size, so it grew a head the export never got.
     #[test]
-    fn the_arrowhead_is_the_same_size_in_the_preview_and_the_export() {
+    fn the_line_head_is_the_same_size_in_the_preview_and_the_export() {
         let head_spread = |scale: f32, side: u32| {
             let mut img = RgbaImage::from_pixel(side, side, Rgba([0, 0, 0, 0]));
-            let mut l = Layer::new(Tool::Arrow, [10.0, 100.0], [255, 0, 0, 255], 1.0, 20.0, 8.0);
+            let mut l = Layer::new(Tool::Line, [10.0, 100.0], [255, 0, 0, 255], 1.0, 20.0, 8.0);
             l.b = [190.0, 100.0];
             apply(&mut img, &[l], scale, None);
             let lit = ink(&img);
@@ -1216,10 +1409,10 @@ mod tests {
     /// Three heads have to be three different marks. A style that silently drew
     /// the same arrow would look like the buttons doing nothing.
     #[test]
-    fn each_arrow_head_draws_something_different() {
+    fn each_line_head_draws_something_different() {
         let render = |head: Head| {
             let mut img = RgbaImage::from_pixel(140, 60, Rgba([0, 0, 0, 0]));
-            let mut l = layer(Tool::Arrow, [10.0, 30.0], [130.0, 30.0]);
+            let mut l = layer(Tool::Line, [10.0, 30.0], [130.0, 30.0]);
             l.stroke = 4.0;
             l.head = head;
             apply(&mut img, &[l], 1.0, None);
@@ -1336,6 +1529,78 @@ mod tests {
             lowest(true) > lowest(false),
             "the underline drew no lower than the text itself"
         );
+    }
+
+    /// The whole point of the new arrow: its proportions are locked, so a
+    /// longer drag makes a *bigger* arrow, not a thinner one.
+    #[test]
+    fn the_arrow_keeps_its_proportions_however_far_it_is_dragged() {
+        let ratio = |len: f32| {
+            let mut l = layer(Tool::Arrow, [0.0, 0.0], [len, 0.0]);
+            l.arrow = ArrowForm::Straight;
+            let pts = arrow_points(&l);
+            let (mut lo, mut hi) = (f32::MAX, f32::MIN);
+            for p in &pts {
+                lo = lo.min(p[1]);
+                hi = hi.max(p[1]);
+            }
+            (hi - lo) / len
+        };
+        let short = ratio(60.0);
+        let long = ratio(600.0);
+        assert!(
+            (short - long).abs() < 1e-3,
+            "a 60px arrow is {short:.3} as wide as it is long and a 600px one \
+             is {long:.3} — the shape is being stretched, not scaled"
+        );
+        assert!(short > 0.2 && short < 0.5, "the head is a strange width: {short}");
+    }
+
+    /// The three forms have to be three different silhouettes, and the bent
+    /// ones have to leave the straight line between tail and tip.
+    #[test]
+    fn the_two_bends_go_opposite_ways_round_a_straight_arrow() {
+        let spine_at_middle = |form: ArrowForm| {
+            let mut l = layer(Tool::Arrow, [0.0, 100.0], [200.0, 100.0]);
+            l.arrow = form;
+            let pts = arrow_points(&l);
+            // The outline is two walks of the same spine, so point `i` on one
+            // wall pairs with `n-1-i` on the other and their midpoint is the
+            // spine itself. Reading one wall alone would just measure the
+            // shaft's own width.
+            let n = pts.len();
+            let i = 10;
+            (pts[i][1] + pts[n - 1 - i][1]) / 2.0
+        };
+        let straight = spine_at_middle(ArrowForm::Straight);
+        let left = spine_at_middle(ArrowForm::BendLeft);
+        let right = spine_at_middle(ArrowForm::BendRight);
+        assert!((straight - 100.0).abs() < 8.0, "the straight arrow is bent");
+        assert!(
+            left < straight - 10.0 && right > straight + 10.0,
+            "the bends sit at {left:.0} and {right:.0} against {straight:.0} — \
+             they are not going opposite ways"
+        );
+    }
+
+    /// A concave polygon needs the crossing count to get its sign right; the
+    /// arrow's notch, where the head meets the shaft, is where a convex test
+    /// would quietly say "inside".
+    #[test]
+    fn the_arrow_is_solid_along_its_spine_and_hollow_beside_the_head() {
+        let mut l = layer(Tool::Arrow, [0.0, 100.0], [200.0, 100.0]);
+        l.arrow = ArrowForm::Straight;
+        let pts = arrow_points(&l);
+        assert!(
+            sd_polygon(60.0, 100.0, &pts) < 0.0,
+            "the middle of the shaft reads as outside the arrow"
+        );
+        assert!(
+            sd_polygon(60.0, 100.0 - 25.0, &pts) > 0.0,
+            "a point well off the shaft reads as inside it"
+        );
+        // Beside the head, past the shaft's width but short of the barb.
+        assert!(sd_polygon(150.0, 100.0, &pts) < 0.0, "the head is hollow");
     }
 
     /// The rim exists so a red arrow on a red picture can still be seen. This
@@ -1526,7 +1791,7 @@ mod tests {
     fn shapes_clipped_by_the_image_edge_do_not_panic() {
         let mut img = RgbaImage::from_pixel(40, 40, Rgba([0, 0, 0, 255]));
         let layers = vec![
-            layer(Tool::Arrow, [-100.0, -100.0], [200.0, 200.0]),
+            layer(Tool::Line, [-100.0, -100.0], [200.0, 200.0]),
             layer(Tool::Blur, [-50.0, -50.0], [500.0, 500.0]),
             layer(Tool::Highlight, [30.0, 30.0], [900.0, 900.0]),
             layer(Tool::Ellipse, [-10.0, -10.0], [10.0, 10.0]),
@@ -1715,9 +1980,14 @@ mod tests {
 
     #[test]
     fn only_line_tools_offer_a_stroke_width() {
-        for t in [Tool::Arrow, Tool::Rect, Tool::Ellipse] {
+        for t in [Tool::Line, Tool::Rect, Tool::Ellipse] {
             assert!(t.uses_stroke(), "{t:?} draws lines");
         }
+        assert!(
+            !Tool::Arrow.uses_stroke(),
+            "the arrow's proportions are locked, so a stroke slider would be a \
+             control that does nothing"
+        );
         for t in [Tool::Text, Tool::Blur, Tool::Highlight, Tool::Fill] {
             assert!(!t.uses_stroke(), "{t:?} has no line to thicken");
         }
