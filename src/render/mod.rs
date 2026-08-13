@@ -235,7 +235,12 @@ pub fn render_detailed(scene: &Scene) -> Rendered {
             size: (iw, ih),
             radius,
         };
-        let layer = frame::shadow_layer((cw, ch), &place, &shadow);
+        // A shadow is cast by whatever is actually painted. An inset frame is a
+        // solid rounded rectangle, so there the rectangle is the caster; with no
+        // frame the caster is the shot itself, and a shot masked to a window's
+        // own shape has transparent corners a rectangle would smear across.
+        let caster = (inset == 0).then_some(shot);
+        let layer = frame::shadow_layer((cw, ch), &place, &shadow, caster);
         image::imageops::overlay(&mut canvas, &layer, 0, 0);
     }
 

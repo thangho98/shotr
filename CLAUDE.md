@@ -214,6 +214,38 @@ the hotkey is bound to. `-o` is honoured under `-i -W`; it was simply absent
 elsewhere. Both flags are byte-for-byte no-ops on a rectangle, measured, so both
 interactive sources now pass both.
 
+**A transparent edge is not a black edge, and `border_color` used to disagree.**
+`screencapture -o` masks the shot to the window's own shape, so every pixel
+outside it is `(0, 0, 0, 0)` — and shotr's own editor window, being undecorated
+and transparent, carries a 16px ring of exactly that. `render::frame::border_color`
+sampled that ring, found every sample in perfect agreement, averaged them to
+`(0, 0, 0)` and then *forced alpha to 255*: the inset frame came out opaque black
+around every window capture. It reads as the capture having a black border baked
+in, which sends you to `capture/` — where nothing is wrong, and a `screencapture
+-l<id> -o` of the same window settles it in seconds by coming back correctly
+transparent. Only fully opaque pixels vote now, and the majority is still
+measured against the whole ring, so a mostly-transparent edge fails the 60% test
+without needing a threshold of its own. `inset_only_if_detected` then drops the
+frame, and the background shows through the margin — which is what a transparent
+window is supposed to look like.
+
+The inset frame is a *filled* rounded rectangle the shot then sits on top of, not
+a ring, which is why that black was not 17px of trim: every transparent pixel
+anywhere in the shot showed it. iPhone Mirroring is the case that makes this
+obvious — a phone outline inside a 444×972 window, so the black filled all four
+corners, and it reads as the capture having come back black. Any window whose
+shape is not its rectangle does the same thing.
+
+**A shadow is cast by what is painted, which is not always the rectangle.**
+Dropping that black frame left a second, quieter bug behind: `shadow_layer` fills
+`Placement` and blurs it, so a shape-masked window cast a *rectangle's* shadow
+across its own transparent corners — a grey smudge on the background that reads
+as dirt rather than as a shadow. It only shows up on a window that is not a
+rectangle, so an ordinary screenshot never reveals it. `shadow_layer` therefore
+takes an optional mask whose alpha narrows the silhouette, and `render_detailed`
+passes the shot when `inset == 0`. With a frame the rectangle really is the
+caster — the frame is solid — so the mask must *not* be passed there.
+
 **`crop_imm` clamps, and a clamped miss is a 0×0 image.** The editor keeps the
 whole desktop snapshot, not only the image it is editing: `--capture --full
 --monitor N` cuts one screen out of it, and "Back to selection" hands the picker

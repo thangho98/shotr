@@ -117,6 +117,13 @@ pub fn content_box(img: &RgbaImage, tolerance: u8) -> (u32, u32, u32, u32) {
 /// captured rather than a white border stuck around it. Returns `None` when the
 /// edges disagree — a photo or a busy screenshot has no such colour, and
 /// guessing one would look worse than the default.
+///
+/// A transparent edge counts as disagreement, not as black. `screencapture -o`
+/// hands back a window masked to its own shape, so every pixel outside it is
+/// `(0, 0, 0, 0)` — and shotr's own editor window, being undecorated and
+/// transparent, carries a 16px ring of exactly that. Letting those pixels vote
+/// made the whole ring agree on "black", and the inset frame was painted opaque
+/// black around every window capture.
 pub fn border_color(img: &RgbaImage, tolerance: u8) -> Option<Rgba<u8>> {
     let (w, h) = (img.width(), img.height());
     if w < 8 || h < 8 {
@@ -135,13 +142,18 @@ pub fn border_color(img: &RgbaImage, tolerance: u8) -> Option<Rgba<u8>> {
         samples.push(*img.get_pixel(0, y));
         samples.push(*img.get_pixel(w - 1, y));
     }
-    if samples.is_empty() {
-        return None;
-    }
+    let ring = samples.len();
+    // Only a fully opaque pixel has a colour of its own; anything less is
+    // already a blend with whatever sat behind the window. Dropping them here
+    // rather than testing the winner afterwards keeps the majority measured
+    // against the *whole* ring, so a mostly-transparent edge fails the 60% test
+    // below on its own and needs no threshold of its own.
+    samples.retain(|s| s.0[3] == u8::MAX);
+    let first = *samples.first()?;
 
     // Whichever sample the most others agree with wins, provided it is a real
     // majority rather than the largest of many small groups.
-    let mut best = (0usize, samples[0]);
+    let mut best = (0usize, first);
     for candidate in &samples {
         let agree = samples
             .iter()
@@ -151,7 +163,7 @@ pub fn border_color(img: &RgbaImage, tolerance: u8) -> Option<Rgba<u8>> {
             best = (agree, *candidate);
         }
     }
-    if (best.0 as f32) / (samples.len() as f32) < 0.6 {
+    if (best.0 as f32) / (ring as f32) < 0.6 {
         return None;
     }
 
@@ -202,17 +214,34 @@ pub struct Placement {
 }
 
 /// Render a blurred drop shadow cast by `place` onto a `cw`×`ch` canvas.
-pub fn shadow_layer(canvas: (u32, u32), place: &Placement, shadow: &Shadow) -> RgbaImage {
+///
+/// `mask` is the thing being lit, and its alpha narrows the silhouette: pass it
+/// whenever the caster is not a solid rounded rectangle. A window captured with
+/// `screencapture -o` is masked to its own shape, and something like iPhone
+/// Mirroring is a phone outline inside a much larger rectangle — cast from the
+/// rectangle, its shadow fills all four transparent corners with a grey smudge
+/// that reads as dirt on the background. Its dimensions must be `place.size`.
+pub fn shadow_layer(
+    canvas: (u32, u32),
+    place: &Placement,
+    shadow: &Shadow,
+    mask: Option<&RgbaImage>,
+) -> RgbaImage {
     let (cw, ch) = canvas;
     let (ox, oy) = place.origin;
     let (w, h) = place.size;
     let r = place.radius;
+    debug_assert!(
+        mask.is_none_or(|m| (m.width(), m.height()) == (w, h)),
+        "the mask has to line up with the rectangle it narrows"
+    );
 
     let mut layer = RgbaImage::new(cw, ch);
     let dy = shadow.offset_y.round() as i64;
     for y in 0..h {
         for x in 0..w {
-            let cov = rounded_coverage(x, y, w, h, r);
+            let cov = rounded_coverage(x, y, w, h, r)
+                * mask.map_or(1.0, |m| m.get_pixel(x, y).0[3] as f32 / 255.0);
             if cov <= 0.0 {
                 continue;
             }
@@ -309,6 +338,42 @@ mod tests {
         assert!(c.0[0] > 200, "got {:?}", c.0);
     }
 
+    /// A window capture is masked to the window's own shape, so the edge is
+    /// transparent. Averaging those pixels yields `(0, 0, 0)`, and forcing that
+    /// opaque painted a black ring around every window shot — reported as "the
+    /// window capture has a black border, I expected it transparent".
+    #[test]
+    fn border_color_declines_a_transparent_edge() {
+        let mut img = RgbaImage::from_pixel(200, 150, Rgba([0, 0, 0, 0]));
+        for y in 16..134 {
+            for x in 16..184 {
+                img.put_pixel(x, y, Rgba([250, 250, 252, 255]));
+            }
+        }
+        assert_eq!(
+            border_color(&img, 8),
+            None,
+            "a transparent margin has no colour; calling it black paints a ring"
+        );
+    }
+
+    /// Only the margin is transparent, not the window: an ordinary capture keeps
+    /// its rounded corners masked out, and that must not defeat detection.
+    #[test]
+    fn border_color_survives_masked_corners() {
+        let mut img = RgbaImage::from_pixel(200, 150, Rgba([32, 33, 36, 255]));
+        for y in 0..8 {
+            for x in 0..8 {
+                img.put_pixel(x, y, Rgba([0, 0, 0, 0]));
+                img.put_pixel(199 - x, y, Rgba([0, 0, 0, 0]));
+                img.put_pixel(x, 149 - y, Rgba([0, 0, 0, 0]));
+                img.put_pixel(199 - x, 149 - y, Rgba([0, 0, 0, 0]));
+            }
+        }
+        let c = border_color(&img, 8).expect("the chrome is still the clear majority");
+        assert_eq!([c.0[0], c.0[1], c.0[2]], [32, 33, 36]);
+    }
+
     #[test]
     fn border_color_is_none_for_a_tiny_image() {
         assert!(border_color(&RgbaImage::new(4, 4), 8).is_none());
@@ -335,6 +400,46 @@ mod tests {
     #[test]
     fn zero_radius_covers_everything() {
         assert_eq!(rounded_coverage(0, 0, 100, 100, 0), 1.0);
+    }
+
+    /// A window captured with `screencapture -o` is masked to its own shape, so
+    /// its rectangle is mostly empty at the corners — iPhone Mirroring is a phone
+    /// outline in a much larger frame. Casting from the rectangle filled those
+    /// corners with a grey smudge that reads as dirt on the background.
+    #[test]
+    fn a_shadow_is_cast_by_the_silhouette_not_the_rectangle() {
+        let shadow = Shadow::from_strength(1, 1.0).unwrap();
+        let place = Placement {
+            origin: (20, 20),
+            size: (100, 100),
+            radius: 0,
+        };
+        // Opaque on the left half only.
+        let mut mask = RgbaImage::from_pixel(100, 100, Rgba([0, 0, 0, 0]));
+        for y in 0..100 {
+            for x in 0..50 {
+                mask.put_pixel(x, y, Rgba([9, 9, 9, 255]));
+            }
+        }
+        let dy = shadow.offset_y.round() as u32;
+        let (solid, empty) = ((45, 70 + dy), (95, 70 + dy));
+
+        let plain = shadow_layer((200, 200), &place, &shadow, None);
+        assert!(
+            plain.get_pixel(empty.0, empty.1).0[3] > 20,
+            "with no mask the whole rectangle casts, which is what a frame does"
+        );
+
+        let masked = shadow_layer((200, 200), &place, &shadow, Some(&mask));
+        assert!(
+            masked.get_pixel(solid.0, solid.1).0[3] > 20,
+            "the opaque half must still cast a shadow"
+        );
+        assert!(
+            masked.get_pixel(empty.0, empty.1).0[3] < 3,
+            "a transparent corner casts no shadow, got {:?}",
+            masked.get_pixel(empty.0, empty.1).0
+        );
     }
 
     #[test]
