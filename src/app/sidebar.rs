@@ -54,7 +54,33 @@ impl ShotrApp {
         let open = self.open_section == Some(which);
         if theme::fold(ui, title, open, |ui| body(self, ui)) {
             self.open_section = if open { None } else { Some(which) };
+            self.sync_ocr_mode();
         }
+    }
+
+    /// Text recognition may only be armed while its own fold is open.
+    ///
+    /// A live `OcrMode` takes every click on the canvas — `edit_central` hands
+    /// input to `ocr_input` instead of `annotation_input` — so collapsing the
+    /// section used to leave the blue word overlay up, every drawing tool dead,
+    /// and the only "Off" button hidden inside the section that had just been
+    /// closed. The tool pill and the status line went on describing annotation
+    /// the whole time, which is what made it read as the editor having frozen
+    /// rather than as a mode being stuck on.
+    ///
+    /// Called again when recognition finishes, so a section opened while the
+    /// worker was still reading arms itself once there is something to arm on.
+    pub(crate) fn sync_ocr_mode(&mut self) {
+        // Armed only with words to act on: an empty word list would deaden every
+        // click on the canvas and give nothing back, which is the same trap in
+        // the other direction.
+        self.ocr_mode = if self.open_section == Some(Section::Ocr) && !self.ocr_words.is_empty() {
+            // Opening the section is the request to see the words; landing on
+            // `Off` would show nothing and offer no clue that a mode is needed.
+            OcrMode::SelectText
+        } else {
+            OcrMode::Off
+        };
     }
 
     // ----------------------------------------------------------------- select
@@ -890,7 +916,7 @@ impl ShotrApp {
                 &[
                     (OcrMode::Off, t("Off")),
                     (OcrMode::SelectText, t("Select text")),
-                    (OcrMode::ManualRedact, "Che tay"),
+                    (OcrMode::ManualRedact, t("Cover by hand")),
                 ],
             );
         });

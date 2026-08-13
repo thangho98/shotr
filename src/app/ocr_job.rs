@@ -103,6 +103,7 @@ impl ShotrApp {
                     .extend(crate::ocr::detect::scan_phones(&words));
                 self.ocr_words = words;
                 self.ocr_state = OcrState::Ready;
+                self.sync_ocr_mode();
                 self.dirty = true;
             }
             Outcome::Failed(e) => {
@@ -175,11 +176,12 @@ impl ShotrApp {
     /// to have. The same rule already keeps `--copy` out of the windowless path.
     pub(crate) fn redaction_layers(&self) -> Vec<Layer> {
         let mut out = Vec::new();
+        let bands = line_bands(&self.ocr_words);
 
         if self.prefs.redact {
             for finding in &self.ocr_findings {
                 if self.kind_enabled(finding.kind)
-                    && let Some(rect) = self.finding_rect(finding)
+                    && let Some(rect) = self.finding_rect(finding, &bands)
                 {
                     out.push(self.redaction_layer(rect));
                 }
@@ -187,23 +189,30 @@ impl ShotrApp {
         }
         for &i in &self.manual_redact {
             if let Some(word) = self.ocr_words.get(i) {
-                out.push(self.redaction_layer(pad_rect(word.rect)));
+                out.push(self.redaction_layer(pad_rect(banded(word.rect, bands.get(i)))));
             }
         }
         out
     }
 
-    pub(crate) fn finding_rect(&self, finding: &Finding) -> Option<[f32; 4]> {
-        let mut iter = finding.words.iter().filter_map(|i| self.ocr_words.get(*i));
-        let first = iter.next()?;
-        let mut r = first.rect;
-        for w in iter {
-            r[0] = r[0].min(w.rect[0]);
-            r[1] = r[1].min(w.rect[1]);
-            r[2] = r[2].max(w.rect[2]);
-            r[3] = r[3].max(w.rect[3]);
+    pub(crate) fn finding_rect(&self, finding: &Finding, bands: &[[f32; 2]]) -> Option<[f32; 4]> {
+        let mut out: Option<[f32; 4]> = None;
+        for &i in &finding.words {
+            let Some(word) = self.ocr_words.get(i) else {
+                continue;
+            };
+            let r = banded(word.rect, bands.get(i));
+            out = Some(match out {
+                None => r,
+                Some(a) => [
+                    a[0].min(r[0]),
+                    a[1].min(r[1]),
+                    a[2].max(r[2]),
+                    a[3].max(r[3]),
+                ],
+            });
         }
-        Some(pad_rect(r))
+        Some(pad_rect(out?))
     }
 
     fn redaction_layer(&self, rect: [f32; 4]) -> Layer {
@@ -237,14 +246,18 @@ impl ShotrApp {
     }
 }
 
-/// Rebuild reading order: sort by line, then by x, inserting newlines between
-/// lines so pasted text keeps its shape.
-fn join_words(words: &[Word], indices: &[usize]) -> String {
-    let mut picked: Vec<&Word> = indices.iter().filter_map(|i| words.get(*i)).collect();
-    if picked.is_empty() {
-        return String::new();
-    }
-    picked.sort_by(|a, b| {
+/// The given words grouped into text lines, each line ordered left to right.
+///
+/// Shared by the text join and the redaction bands so the two can never
+/// disagree about where a line ends.
+fn lines_of(words: &[Word], indices: &[usize]) -> Vec<Vec<usize>> {
+    let mut order: Vec<usize> = indices
+        .iter()
+        .copied()
+        .filter(|i| *i < words.len())
+        .collect();
+    order.sort_by(|a, b| {
+        let (a, b) = (&words[*a], &words[*b]);
         a.rect[1]
             .partial_cmp(&b.rect[1])
             .unwrap_or(std::cmp::Ordering::Equal)
@@ -255,23 +268,76 @@ fn join_words(words: &[Word], indices: &[usize]) -> String {
             )
     });
 
-    let mut out = String::new();
-    let mut line_top = picked[0].rect[1];
-    let mut line_height = picked[0].height().max(1.0);
-    for (i, w) in picked.iter().enumerate() {
-        if i > 0 {
-            // More than half a line's worth of vertical drift starts a new line.
-            if (w.rect[1] - line_top).abs() > line_height * 0.6 {
-                out.push('\n');
-                line_top = w.rect[1];
-                line_height = w.height().max(1.0);
-            } else {
-                out.push(' ');
-            }
+    let mut out: Vec<Vec<usize>> = Vec::new();
+    let mut top = 0.0_f32;
+    let mut height = 1.0_f32;
+    for i in order {
+        let w = &words[i];
+        // More than half a line's worth of vertical drift starts a new line.
+        let same = !out.is_empty() && (w.rect[1] - top).abs() <= height * 0.6;
+        if same {
+            out.last_mut().expect("checked non-empty").push(i);
+        } else {
+            top = w.rect[1];
+            height = w.height().max(1.0);
+            out.push(vec![i]);
         }
-        out.push_str(w.text.trim());
     }
     out
+}
+
+/// Top and bottom of the text line each word sits on, indexed like `words`.
+///
+/// A recognised box hugs the ink, not the line, so on one line `393` (digits),
+/// `measured` (an ascender) and `worker` (neither) all come back different
+/// heights — and `pad_rect` then scales its padding by that height and
+/// multiplies the difference. Redaction bars built straight off those boxes come
+/// out visibly ragged.
+///
+/// Vietnamese makes this worse rather than causing it: a tone mark raises the
+/// top of some words on a line and not others, so `Việt` and `nam` differ where
+/// `Viet` and `nam` would not. Giving every word on a line the line's own extent
+/// is what makes the bars even.
+fn line_bands(words: &[Word]) -> Vec<[f32; 2]> {
+    let mut bands: Vec<[f32; 2]> = words.iter().map(|w| [w.rect[1], w.rect[3]]).collect();
+    let all: Vec<usize> = (0..words.len()).collect();
+    for line in lines_of(words, &all) {
+        let top = line
+            .iter()
+            .map(|i| words[*i].rect[1])
+            .fold(f32::INFINITY, f32::min);
+        let bottom = line
+            .iter()
+            .map(|i| words[*i].rect[3])
+            .fold(f32::NEG_INFINITY, f32::max);
+        for i in line {
+            bands[i] = [top, bottom];
+        }
+    }
+    bands
+}
+
+/// A word's box with its top and bottom taken from the line it sits on.
+fn banded(rect: [f32; 4], band: Option<&[f32; 2]>) -> [f32; 4] {
+    match band {
+        Some([top, bottom]) => [rect[0], *top, rect[2], *bottom],
+        None => rect,
+    }
+}
+
+/// Rebuild reading order: sort by line, then by x, inserting newlines between
+/// lines so pasted text keeps its shape.
+fn join_words(words: &[Word], indices: &[usize]) -> String {
+    lines_of(words, indices)
+        .iter()
+        .map(|line| {
+            line.iter()
+                .map(|i| words[*i].text.trim())
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// A box that hugs the glyphs exactly still leaves legible edges, so grow it.
@@ -369,6 +435,79 @@ mod tests {
             out[0] <= 8.0,
             "expected at least 2px of padding, got {out:?}"
         );
+    }
+
+    /// A recognised box hugs the ink, so words on one line come back at
+    /// different heights — worst with Vietnamese, where a tone mark raises the
+    /// top of some words and not others. Redaction bars must not inherit that.
+    #[test]
+    fn every_word_on_a_line_redacts_to_the_same_height() {
+        // One line: a tall word with a tone mark, a short one with neither
+        // ascender nor descender, and a digit group.
+        let words = vec![
+            Word {
+                text: "Việt".into(),
+                rect: [0.0, 90.0, 40.0, 120.0],
+            },
+            Word {
+                text: "nam".into(),
+                rect: [50.0, 100.0, 90.0, 118.0],
+            },
+            Word {
+                text: "393".into(),
+                rect: [100.0, 96.0, 140.0, 120.0],
+            },
+        ];
+        let bands = line_bands(&words);
+        assert_eq!(
+            bands[0], bands[1],
+            "a tone mark must not make one word's bar taller than its neighbour's"
+        );
+        assert_eq!(bands[1], bands[2], "digits must share the line's band too");
+        assert_eq!(
+            bands[0],
+            [90.0, 120.0],
+            "the band must be the union of the line, not any one word"
+        );
+
+        // And the padded boxes therefore come out the same height.
+        let heights: Vec<f32> = (0..3)
+            .map(|i| {
+                let r = pad_rect(banded(words[i].rect, bands.get(i)));
+                r[3] - r[1]
+            })
+            .collect();
+        assert!(
+            heights.windows(2).all(|w| (w[0] - w[1]).abs() < 0.01),
+            "padded redaction boxes differ in height: {heights:?}"
+        );
+    }
+
+    /// Words on genuinely different lines must keep their own bands, or one
+    /// redaction would grow to cover the paragraph.
+    #[test]
+    fn separate_lines_keep_separate_bands() {
+        let words = vec![w("first", 0.0, 10.0), w("second", 0.0, 100.0)];
+        let bands = line_bands(&words);
+        assert_ne!(
+            bands[0], bands[1],
+            "two lines 90px apart must not share one band"
+        );
+    }
+
+    /// The band must widen a short word's box, never shift it sideways.
+    #[test]
+    fn banding_leaves_the_horizontal_edges_alone() {
+        let out = banded([10.0, 50.0, 90.0, 60.0], Some(&[40.0, 70.0]));
+        assert_eq!(out[0], 10.0, "left edge moved");
+        assert_eq!(out[2], 90.0, "right edge moved");
+        assert_eq!([out[1], out[3]], [40.0, 70.0], "band was not applied");
+    }
+
+    #[test]
+    fn banding_a_word_with_no_line_is_a_no_op() {
+        let r = [1.0, 2.0, 3.0, 4.0];
+        assert_eq!(banded(r, None), r);
     }
 
     #[test]

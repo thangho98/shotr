@@ -161,6 +161,7 @@ static VI: &[(&str, &str)] = &[
     ("Copy the text in the image", "📋 Copy chữ trong ảnh"),
     ("Corner", "Góc"),
     ("Could not open the editor", "Không mở được trình sửa"),
+    ("Cover by hand", "Che tay"),
     ("Crop to selection", "Cắt vùng đã chọn"),
     ("Custom", "Tuỳ chỉnh"),
     ("Dark", "Tối"),
