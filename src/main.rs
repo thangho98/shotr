@@ -366,10 +366,7 @@ fn main() -> eframe::Result {
 
     eframe::run_native(
         "shotr",
-        eframe::NativeOptions {
-            viewport,
-            ..Default::default()
-        },
+        shotr::app::native_options(viewport),
         Box::new(move |cc| {
             let mut app = ShotrApp::new(cc, start, source, views.clone());
             app.copy_on_finish = copy_on_finish;

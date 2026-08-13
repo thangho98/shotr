@@ -35,9 +35,10 @@ pub fn run(tick: impl FnMut(Option<Command>) -> bool) -> i32 {
     let mut builder = EventLoop::builder();
 
     // An app with no window still claims a Dock icon and a menu bar unless it
-    // says otherwise. Doing this at runtime rather than with `LSUIElement` in
-    // Info.plist is deliberate: that key applies to the whole bundle, so it
-    // would strip the editor of its Dock icon and its menu as well.
+    // says otherwise. Every shotr process asks for the same policy — see
+    // `app::native_options` — so `LSUIElement` in Info.plist would now say the
+    // same thing. It is still done here instead, because the key only applies
+    // to a bundle and a `cargo run` build has none.
     #[cfg(target_os = "macos")]
     {
         use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};

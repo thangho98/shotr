@@ -1872,11 +1872,101 @@ pub fn window_icon() -> egui::IconData {
     }
 }
 
+/// The eframe options every shotr window is opened with.
+///
+/// The only thing in here is the macOS activation policy, and it is the whole
+/// reason the function exists: shotr lives in the menu bar, but every window it
+/// opens is a *fresh process*, and winit deliberately leaves a bundled app's
+/// policy alone so that `LSUIElement` can decide. There is no `LSUIElement`, so
+/// each of those processes came up `Regular` — a Dock tile and a menu bar for
+/// the length of an edit, which was the intent, and one consequence that was
+/// not: becoming a regular app registers the bundle with LaunchServices as one
+/// that was *used*, so the Dock's "recent applications" section keeps the tile
+/// long after the process is gone. Measured on 26.5 — `defaults read
+/// com.apple.dock recent-apps` held `dev.shotr.app` while no shotr process was
+/// running, and that tile only clears by hand or by turning recents off.
+///
+/// `Accessory` is what the tray daemon already asks for, so shotr is a menu-bar
+/// app throughout now, the way Shottr and CleanShot are. Windows still come to
+/// the front and take the keyboard: winit's `activate_ignoring_other_apps`
+/// defaults to true and runs straight after the policy is set. The cost is
+/// cmd+tab and the system menu bar, and the editor draws its own title bar and
+/// reads its own shortcuts, so neither was carrying much.
+pub fn native_options(viewport: egui::ViewportBuilder) -> eframe::NativeOptions {
+    #[allow(unused_mut)]
+    let mut options = eframe::NativeOptions {
+        viewport,
+        ..Default::default()
+    };
+
+    #[cfg(target_os = "macos")]
+    {
+        use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
+        options.event_loop_builder = Some(Box::new(|builder| {
+            builder.with_activation_policy(ActivationPolicy::Accessory);
+        }));
+    }
+
+    options
+}
+
 pub(crate) fn to_color_image(img: &RgbaImage) -> egui::ColorImage {
     egui::ColorImage::from_rgba_unmultiplied(
         [img.width() as usize, img.height() as usize],
         img.as_raw(),
     )
+}
+
+#[cfg(test)]
+mod window_tests {
+    /// Every window shotr opens has to go through [`super::native_options`], or
+    /// on macOS that one takes a Dock tile and leaves the bundle sitting in the
+    /// Dock's "recent applications" section after it has quit. Nothing stops
+    /// compiling if a new window builds its own `NativeOptions` instead — the
+    /// only symptom is a tile that outlives the process — so the test reads the
+    /// source and insists the two counts agree.
+    #[test]
+    fn every_window_is_opened_through_native_options() {
+        let mut files = Vec::new();
+        collect_rs(std::path::Path::new("src"), &mut files);
+        assert!(!files.is_empty(), "found no source to scan");
+
+        let mut runs = 0;
+        let mut through_helper = 0;
+        for path in &files {
+            let Ok(text) = std::fs::read_to_string(path) else {
+                continue;
+            };
+            // Skip this file: it defines the helper and names it in prose.
+            if path.ends_with("app/mod.rs") {
+                continue;
+            }
+            runs += text.matches("run_native(").count();
+            through_helper += text.matches("native_options(").count();
+        }
+
+        assert!(runs > 0, "found no run_native call to check");
+        assert_eq!(
+            through_helper, runs,
+            "{runs} window(s) are opened but only {through_helper} ask for \
+             native_options; the rest will claim a macOS Dock tile and stick in \
+             the Dock's recents after quitting"
+        );
+    }
+
+    fn collect_rs(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                collect_rs(&path, out);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                out.push(path);
+            }
+        }
+    }
 }
 
 #[cfg(test)]

@@ -307,11 +307,30 @@ libappindicator there, which is the C build dependency this project does
 without. That is a property of that crate, not of Linux tray icons — `ksni`
 needs none of them. The `tray/` façade exists to keep the two apart.
 
-**macOS: set the activation policy, not `LSUIElement`.** The daemon has no
-window and would otherwise take a Dock icon and a menu bar. `LSUIElement` in
-`Info.plist` would fix that for the *whole bundle* — including the editor, which
-does want both. winit's `ActivationPolicy::Accessory` applies to the one process
-that asked for it.
+**macOS: shotr is a menu-bar app in every process, and the Dock is why.** The
+daemon has no window and would otherwise take a Dock icon and a menu bar. The
+editor was left `Regular` on the reasoning that a window *wants* both — and it
+does, but that is not all it buys. Becoming a regular app registers the bundle
+with LaunchServices as one that was used, so the Dock's "recent applications"
+section keeps the tile long after the process has gone. Measured on 26.5:
+`defaults read com.apple.dock recent-apps` held `dev.shotr.app` with no shotr
+process running, and since every capture is a *fresh process* the tile came
+back after each one. It reads as the app failing to quit, which sends you
+looking at the editor's exit path — where nothing is wrong, and `ps` says so.
+
+So `app::native_options` asks for `Accessory` too, and every window goes
+through it: editor, Preferences and pin alike. A test reads the source and
+counts `run_native` calls against it, because a fourth window that builds its
+own options still compiles and the only symptom is a tile that outlives the
+process. Windows still come to the front and take the keyboard — winit's
+`activate_ignoring_other_apps` defaults to true and runs straight after the
+policy is set. What is given up is cmd+tab and the system menu bar, neither of
+which was carrying much: the editor draws its own title bar and reads its own
+shortcuts.
+
+Setting it at runtime rather than with `LSUIElement` in `Info.plist` still
+matters, even though that key would now say the same thing for the whole
+bundle: it only applies to a bundle, and a `cargo run` build has none.
 
 **One renderer for preview and export.** `Scene::scale` is what makes the
 preview and the exported file identical code. Anything that draws must go

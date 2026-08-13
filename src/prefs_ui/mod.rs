@@ -161,10 +161,7 @@ pub fn run() -> eframe::Result {
         .with_icon(crate::app::window_icon());
     eframe::run_native(
         "shotr-settings",
-        eframe::NativeOptions {
-            viewport,
-            ..Default::default()
-        },
+        crate::app::native_options(viewport),
         Box::new(|cc| Ok(Box::new(PrefsApp::new(cc)))),
     )
 }

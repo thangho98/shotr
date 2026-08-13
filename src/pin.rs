@@ -425,10 +425,7 @@ pub fn run(img: RgbaImage, source: Option<PathBuf>) -> eframe::Result {
 
     eframe::run_native(
         "shotr",
-        eframe::NativeOptions {
-            viewport,
-            ..Default::default()
-        },
+        crate::app::native_options(viewport),
         Box::new(move |cc| Ok(Box::new(PinApp::new(cc, img, source)))),
     )
 }
